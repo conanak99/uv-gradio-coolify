@@ -11,7 +11,7 @@ demo = gr.Interface(
     fn=greet,
     inputs="text",
     outputs="text",
-    title="Hello World",
+    title="Hello World Updated",
 )
 
 if __name__ == "__main__":
