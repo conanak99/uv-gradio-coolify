@@ -15,5 +15,6 @@ demo = gr.Interface(
 )
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 0))
+    port_env = os.environ.get("PORT")
+    port = int(port_env) if port_env else None
     demo.launch(server_port=port)
