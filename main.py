@@ -11,10 +11,10 @@ demo = gr.Interface(
     fn=greet,
     inputs="text",
     outputs="text",
-    title="Hello World Updated",
+    title="Hello World",
 )
 
 if __name__ == "__main__":
     port_env = os.environ.get("PORT")
     port = int(port_env) if port_env else None
-    demo.launch(server_port=port)
+    demo.launch(server_name="0.0.0.0", server_port=port)
