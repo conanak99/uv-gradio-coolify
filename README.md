@@ -16,6 +16,10 @@ uv run python main.py
 
 Then open the URL printed in the terminal (defaults to <http://127.0.0.1:7860>). The app also binds to `0.0.0.0` so other devices on your network can reach it.
 
+## Notes
+
+- **Image resizing**: Input images with any dimension larger than 2048px are automatically scaled down (preserving aspect ratio) before being sent to the model, which supports a maximum of 2048×2048.
+
 ## Configuration
 
 | Env var | Default | Description |
