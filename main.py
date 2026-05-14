@@ -86,15 +86,43 @@ def edit_image(
             executor.submit(run_model, name, image_url, prompt): name for name in models
         }
         results: list[GalleryItem] = []
+        errors: list[str] = []
         for future in concurrent.futures.as_completed(futures):
-            result = future.result()
+            model_name = futures[future]
+            try:
+                result = future.result()
+            except Exception as exc:
+                errors.append(f"{model_name}: {exc}")
+                print(f"[edit_image] {model_name} failed: {exc}")
+                continue
             if result:
                 results.append(result)
 
     if not results:
-        raise gr.Error("No images returned from the API.")
+        detail = "; ".join(errors) if errors else "no images returned"
+        raise gr.Error(f"All model calls failed ({detail}).")
+
+    if errors:
+        gr.Warning(f"Some models failed: {'; '.join(errors)}")
 
     return results
+
+
+def edit_image_flow(
+    image_path: str, prompt: str, models: list[ModelName]
+):
+    # Disable the button while work is in flight; yielding ensures the UI
+    # reflects this state before the long-running call starts.
+    yield gr.update(), gr.update(interactive=False, value="Editing...")
+    try:
+        results = edit_image(image_path, prompt, models)
+    except BaseException:
+        # Re-enable the button on any failure (including gr.Error) so the UI
+        # doesn't get stuck in the "Editing..." state, then re-raise to let
+        # Gradio surface the error to the user.
+        yield gr.update(), gr.update(interactive=True, value="Edit Image")
+        raise
+    yield results, gr.update(interactive=True, value="Edit Image")
 
 
 with gr.Blocks(title="Image Editor - fal.ai") as demo:
@@ -121,15 +149,9 @@ with gr.Blocks(title="Image Editor - fal.ai") as demo:
             )
 
     submit_btn.click(
-        fn=lambda: gr.update(interactive=False, value="Editing..."),
-        outputs=submit_btn,
-    ).then(
-        fn=edit_image,
+        fn=edit_image_flow,
         inputs=[input_image, prompt, models],
-        outputs=output_gallery,
-    ).then(
-        fn=lambda: gr.update(interactive=True, value="Edit Image"),
-        outputs=submit_btn,
+        outputs=[output_gallery, submit_btn],
     )
 
 
