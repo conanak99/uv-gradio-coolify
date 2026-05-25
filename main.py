@@ -134,34 +134,96 @@ def edit_image_flow(
     yield results, gr.update(interactive=True, value="Edit Image")
 
 
-with gr.Blocks(title="Image Editor - fal.ai") as demo:
-    gr.Markdown("# Image Editor with fal.ai")
-    gr.Markdown("Upload an image, describe the edit, and choose a model.")
+def generate_image(prompt: str, aspect_ratio: str, num_images: int) -> list[GalleryItem]:
+    if not prompt:
+        raise gr.Error("Please provide a prompt.")
 
-    with gr.Row():
-        with gr.Column():
-            input_image = gr.Image(type="filepath", label="Input Image", height="50vh")
-            prompt = gr.Textbox(
-                label="Edit Prompt",
-                placeholder="Describe what you want to change...",
-            )
-            models = gr.CheckboxGroup(
-                choices=list(MODEL_MAP.keys()),
-                value=list(MODEL_MAP.keys()),
-                label="Models",
-            )
-            submit_btn = gr.Button("Edit Image", variant="primary")
-
-        with gr.Column():
-            output_gallery = gr.Gallery(
-                label="Edited Images", columns=2, object_fit="contain"
-            )
-
-    submit_btn.click(
-        fn=edit_image_flow,
-        inputs=[input_image, prompt, models],
-        outputs=[output_gallery, submit_btn],
+    result: dict[str, Any] = fal_client.subscribe(
+        "xai/grok-imagine-image",
+        arguments={
+            "prompt": prompt,
+            "num_images": num_images,
+            "aspect_ratio": aspect_ratio,
+            "resolution": "1k",
+            "output_format": "jpeg",
+            "sync_mode": False,
+        },
     )
+    images: list[dict[str, Any]] = result.get("images", [])
+    if not images:
+        raise gr.Error("No images returned from the model.")
+    return [(img["url"], f"Grok Imagine ({aspect_ratio})") for img in images]
+
+
+def generate_image_flow(prompt: str, aspect_ratio: str, num_images: str):
+    yield gr.update(), gr.update(interactive=False, value="Generating...")
+    try:
+        results = generate_image(prompt, aspect_ratio, int(num_images))
+    except BaseException:
+        yield gr.update(), gr.update(interactive=True, value="Generate")
+        raise
+    yield results, gr.update(interactive=True, value="Generate")
+
+
+with gr.Blocks(title="Image Studio - fal.ai") as demo:
+    gr.Markdown("# Image Studio with fal.ai")
+
+    with gr.Tabs():
+        with gr.Tab("Edit"):
+            with gr.Row():
+                with gr.Column():
+                    input_image = gr.Image(type="filepath", label="Input Image", height="50vh")
+                    edit_prompt = gr.Textbox(
+                        label="Edit Prompt",
+                        placeholder="Describe what you want to change...",
+                    )
+                    models = gr.CheckboxGroup(
+                        choices=list(MODEL_MAP.keys()),
+                        value=list(MODEL_MAP.keys()),
+                        label="Models",
+                    )
+                    edit_btn = gr.Button("Edit Image", variant="primary")
+
+                with gr.Column():
+                    edit_gallery = gr.Gallery(
+                        label="Edited Images", columns=2, object_fit="contain"
+                    )
+
+            edit_btn.click(
+                fn=edit_image_flow,
+                inputs=[input_image, edit_prompt, models],
+                outputs=[edit_gallery, edit_btn],
+            )
+
+        with gr.Tab("Generate"):
+            with gr.Row():
+                with gr.Column():
+                    gen_prompt = gr.Textbox(
+                        label="Prompt",
+                        placeholder="Describe the image you want to generate...",
+                    )
+                    gen_ratio = gr.Radio(
+                        choices=["16:9", "4:3", "1:1", "3:4", "9:16"],
+                        value="3:4",
+                        label="Aspect Ratio",
+                    )
+                    gen_num = gr.Radio(
+                        choices=["1", "2", "4"],
+                        value="2",
+                        label="Number of Images",
+                    )
+                    gen_btn = gr.Button("Generate", variant="primary")
+
+                with gr.Column():
+                    gen_gallery = gr.Gallery(
+                        label="Generated Images", columns=2, object_fit="contain"
+                    )
+
+            gen_btn.click(
+                fn=generate_image_flow,
+                inputs=[gen_prompt, gen_ratio, gen_num],
+                outputs=[gen_gallery, gen_btn],
+            )
 
 
 if __name__ == "__main__":
