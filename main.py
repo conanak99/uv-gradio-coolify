@@ -17,6 +17,7 @@ type GalleryItem = tuple[ImageUrl, ModelName]
 MODEL_MAP: dict[ModelName, str] = {
     "Qwen Image Edit": "fal-ai/qwen-image-edit-2511",
     "FLUX.2 Klein 9B Edit": "fal-ai/flux-2/klein/9b/edit",
+    "Grok Imagine Image Edit": "xai/grok-imagine-image/edit",
 }
 
 
@@ -51,19 +52,27 @@ def poll_result(request_id: str, model_id: str) -> dict[str, Any]:
         time.sleep(1)
 
 
+def build_arguments(model_id: str, image_url: ImageUrl, prompt: str) -> dict[str, Any]:
+    args: dict[str, Any] = {
+        "prompt": prompt,
+        "image_urls": [image_url],
+        "sync_mode": False,
+        "num_images": 1,
+    }
+    # Grok Imagine doesn't accept `enable_safety_checker`; only add it for
+    # models that do support it.
+    if not model_id.startswith("xai/"):
+        args["enable_safety_checker"] = False
+    return args
+
+
 def run_model(
     model_name: ModelName, image_url: ImageUrl, prompt: str
 ) -> GalleryItem | None:
     model_id = MODEL_MAP[model_name]
     result: dict[str, Any] = fal_client.subscribe(
         model_id,
-        arguments={
-            "prompt": prompt,
-            "image_urls": [image_url],
-            "sync_mode": False,
-            "enable_safety_checker": False,
-            "num_images": 1,
-        },
+        arguments=build_arguments(model_id, image_url, prompt),
     )
     images: list[dict[str, Any]] = result.get("images", [])
     if images:
@@ -137,8 +146,8 @@ with gr.Blocks(title="Image Editor - fal.ai") as demo:
                 placeholder="Describe what you want to change...",
             )
             models = gr.CheckboxGroup(
-                choices=["Qwen Image Edit", "FLUX.2 Klein 9B Edit"],
-                value=["Qwen Image Edit", "FLUX.2 Klein 9B Edit"],
+                choices=list(MODEL_MAP.keys()),
+                value=list(MODEL_MAP.keys()),
                 label="Models",
             )
             submit_btn = gr.Button("Edit Image", variant="primary")
