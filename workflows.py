@@ -219,7 +219,7 @@ def iter_job_progress(
 ) -> Iterator[list[GalleryItem] | None]:
     next_heartbeat = time.monotonic() + heartbeat_seconds
     while not future.done() or not progress_queue.empty():
-        timeout = max(0.0, min(0.5, next_heartbeat - time.monotonic()))
+        timeout = max(0.0, min(0.1, next_heartbeat - time.monotonic()))
         try:
             results = progress_queue.get(timeout=timeout)
         except queue.Empty:
