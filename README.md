@@ -18,7 +18,7 @@ Then open the URL printed in the terminal (defaults to <http://127.0.0.1:7860>).
 
 ## Notes
 
-- **Image preparation**: Input images with any dimension larger than 2048px are automatically scaled down. Seedream edits select the closest supported output ratio and center-crop a temporary input copy to match it. Oversized JSON inputs are converted to a bounded JPEG to stay below NanoGPT's request limit; the uploaded original is unchanged.
+- **Image preparation**: Input images with any dimension larger than 2048px are automatically scaled down. Seedream edits select the closest supported output ratio and center-crop a temporary input copy to match it. NanoGPT inputs are converted to the highest-quality JPEG that stays below its request limit; the uploaded original is unchanged.
 - **Generation models**: Run Grok Imagine, Seedream 5.0 Lite, and Seedream 5.0 Pro individually or in parallel. The UI offers five fixed aspect ratios; models without an exact match use their closest supported ratio.
 - **Progressive results**: Edit and generation galleries update whenever each selected model finishes. While waiting, one-second heartbeats update the elapsed timer and keep the Gradio connection alive. Shared history is finalized only after the complete background job finishes.
 - **History**: The server keeps one public list of the latest 10 edit and generation jobs in memory. Background jobs continue after a client disconnects, and every client can reload or refresh the History tab to retrieve results. Prompts, inputs, errors, and outputs are visible to anyone with access to the app. History is cleared when the app restarts.
