@@ -11,6 +11,7 @@ from image_utils import resize_if_needed
 
 
 IMAGES_URL = "https://nano-gpt.com/api/v1/images"
+IMAGE_EDITS_URL = "https://nano-gpt.com/api/v1/images/edits"
 MAX_INPUT_BYTES = 10 * 1024 * 1024
 
 
@@ -34,9 +35,13 @@ def _api_key() -> str:
     return api_key
 
 
-def _request_images(payload: dict[str, Any], api_key: str) -> list[str]:
+def _request_images(
+    payload: dict[str, Any],
+    api_key: str,
+    endpoint: str = IMAGES_URL,
+) -> list[str]:
     request = Request(
-        IMAGES_URL,
+        endpoint,
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -69,10 +74,10 @@ def edit_image(model_id: str, image_path: str, prompt: str) -> str | None:
     payload = {
         "model": model_id,
         "prompt": prompt,
-        "input_references": [image_to_data_url(image_path)],
+        "imageDataUrl": image_to_data_url(image_path),
         "n": 1,
     }
-    image_urls = _request_images(payload, api_key)
+    image_urls = _request_images(payload, api_key, IMAGE_EDITS_URL)
     return image_urls[0] if image_urls else None
 
 

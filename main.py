@@ -15,8 +15,15 @@ from workflows import (
 
 load_dotenv()
 
+PROMPT_CSS = """
+.prompt-input textarea,
+.prompt-input input {
+    font-size: 16px !important;
+}
+"""
 
-with gr.Blocks(title="Image Studio") as demo:
+
+with gr.Blocks(title="Image Studio", css=PROMPT_CSS) as demo:
     gr.Markdown("# Image Studio")
 
     with gr.Tabs():
@@ -31,6 +38,7 @@ with gr.Blocks(title="Image Studio") as demo:
                     edit_prompt = gr.Textbox(
                         label="Edit Prompt",
                         placeholder="Describe what you want to change...",
+                        elem_classes=["prompt-input"],
                     )
                     models = gr.CheckboxGroup(
                         choices=list(MODEL_MAP.keys()),
@@ -52,6 +60,7 @@ with gr.Blocks(title="Image Studio") as demo:
                     gen_prompt = gr.Textbox(
                         label="Prompt",
                         placeholder="Describe the image you want to generate...",
+                        elem_classes=["prompt-input"],
                     )
                     gen_models = gr.CheckboxGroup(
                         choices=list(GENERATE_MODEL_MAP.keys()),
