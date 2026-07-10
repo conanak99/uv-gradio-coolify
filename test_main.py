@@ -321,63 +321,82 @@ class HistoryTests(unittest.TestCase):
 
     def test_history_keeps_latest_ten_entries(self):
         for index in range(11):
-            entry_id = main.start_history_entry(
+            main.add_history_entry(
                 operation="Generate",
                 prompt=f"Prompt {index}",
                 input_image=None,
-                settings="Aspect ratio: 1:1 · Images: 1",
-            )
-            main.finish_history_entry(
-                entry_id,
                 outputs=[(f"https://image.test/{index}.png", "Model")],
+                settings="Aspect ratio: 1:1 · Images: 1",
             )
 
         history = main.get_history()
         self.assertEqual(len(history), 10)
         self.assertEqual(history[0]["prompt"], "Prompt 10")
         self.assertEqual(history[-1]["prompt"], "Prompt 1")
-        self.assertTrue(all(entry["status"] == "Completed" for entry in history))
 
     def test_history_entry_view_returns_selected_input_and_outputs(self):
         outputs = [("https://image.test/edited.png", "Edit Model")]
-        entry_id = main.start_history_entry(
+        entry_id = main.add_history_entry(
             operation="Edit",
             prompt="Make it brighter",
             input_image="/tmp/input.png",
+            outputs=outputs,
             settings="Models: Edit Model",
         )
-        main.finish_history_entry(entry_id, outputs=outputs)
         history = main.get_history()
 
-        details, prompt, input_image, selected_outputs = main.history_entry_view(
+        details, prompt, input_html, outputs_html = main.history_entry_view(
             history, entry_id
         )
 
         self.assertIn("Edit", details)
-        self.assertIn("Completed", details)
         self.assertEqual(prompt, "Make it brighter")
-        self.assertEqual(input_image, "/tmp/input.png")
-        self.assertEqual(selected_outputs, outputs)
+        self.assertIn("/gradio_api/file=/tmp/input.png", input_html)
+        self.assertIn("https://image.test/edited.png", outputs_html)
+        self.assertIn("Edit Model", outputs_html)
 
     def test_refresh_exposes_shared_history(self):
-        entry_id = main.start_history_entry(
+        entry_id = main.add_history_entry(
             operation="Generate",
             prompt="Visible on every device",
             input_image=None,
+            outputs=[("https://image.test/shared.png", "Shared")],
             settings="Model: Shared",
         )
-        main.finish_history_entry(
-            entry_id,
-            outputs=[("https://image.test/shared.png", "Shared")],
-        )
 
-        selector, details, prompt, input_image, outputs = main.refresh_history()
+        selector, details, prompt, input_html, outputs_html = main.refresh_history()
 
         self.assertEqual(selector["value"], entry_id)
-        self.assertIn("Completed", details)
         self.assertEqual(prompt, "Visible on every device")
-        self.assertIsNone(input_image)
-        self.assertEqual(outputs, [("https://image.test/shared.png", "Shared")])
+        self.assertIn("No input image", input_html)
+        self.assertIn("https://image.test/shared.png", outputs_html)
+        self.assertIn("Shared", outputs_html)
+
+    def test_history_html_handles_data_urls_without_gradio_file_processing(self):
+        outputs_html = main.history_outputs_html(
+            [("data:image/png;base64,dHdv", "Inline image")]
+        )
+
+        self.assertIn('src="data:image/png;base64,dHdv"', outputs_html)
+        self.assertIn("Inline image", outputs_html)
+
+    def test_failed_job_is_not_added_to_history(self):
+        with patch.object(
+            main,
+            "generate_image",
+            side_effect=RuntimeError("provider failed"),
+        ):
+            flow = main.generate_image_flow(
+                "This will fail",
+                [main.SEEDREAM_PRO_GENERATE_MODEL],
+                "1:1",
+                "1",
+            )
+            next(flow)
+            with self.assertRaisesRegex(RuntimeError, "provider failed"):
+                list(flow)
+
+        self.assertEqual(main.get_history(), [])
 
     def test_generate_flow_adds_successful_request_to_history(self):
         outputs = [
@@ -408,7 +427,6 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(final_update[0], outputs)
         history = main.get_history()
         self.assertEqual(history[0]["operation"], "Generate")
-        self.assertEqual(history[0]["status"], "Completed")
         self.assertEqual(history[0]["prompt"], "A lighthouse")
         self.assertIn(
             main.SEEDREAM_LITE_GENERATE_MODEL,
@@ -419,8 +437,8 @@ class HistoryTests(unittest.TestCase):
             history[0]["settings"],
         )
         self.assertEqual(final_update[4], "A lighthouse")
-        self.assertIsNone(final_update[5])
-        self.assertEqual(final_update[6], outputs)
+        self.assertIn("No input image", final_update[5])
+        self.assertIn("https://image.test/generated.png", final_update[6])
         generate_image.assert_called_once_with(
             "A lighthouse",
             [
@@ -466,9 +484,7 @@ class HistoryTests(unittest.TestCase):
             partial_update = next(flow)
 
             self.assertEqual(partial_update[0], first_result)
-            running_history = main.get_history()[0]
-            self.assertEqual(running_history["status"], "Running")
-            self.assertEqual(running_history["outputs"], [])
+            self.assertEqual(main.get_history(), [])
 
             release_second_result.set()
             remaining_updates = list(flow)
@@ -476,7 +492,6 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(remaining_updates[0][0], all_results)
         self.assertEqual(remaining_updates[-1][0], all_results)
         completed_history = main.get_history()[0]
-        self.assertEqual(completed_history["status"], "Completed")
         self.assertEqual(completed_history["outputs"], all_results)
 
     def test_edit_flow_streams_before_storing_complete_history(self):
@@ -503,9 +518,7 @@ class HistoryTests(unittest.TestCase):
             partial_update = next(flow)
 
             self.assertEqual(partial_update[0], first_result)
-            running_history = main.get_history()[0]
-            self.assertEqual(running_history["status"], "Running")
-            self.assertEqual(running_history["outputs"], [])
+            self.assertEqual(main.get_history(), [])
 
             release_second_result.set()
             remaining_updates = list(flow)
@@ -513,7 +526,6 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(remaining_updates[0][0], all_results)
         self.assertEqual(remaining_updates[-1][0], all_results)
         completed_history = main.get_history()[0]
-        self.assertEqual(completed_history["status"], "Completed")
         self.assertEqual(completed_history["outputs"], all_results)
 
     def test_generation_completes_in_memory_after_client_disconnect(self):
@@ -536,11 +548,8 @@ class HistoryTests(unittest.TestCase):
                 "1:1",
                 "1",
             )
-            first_update = next(flow)
-            self.assertEqual(
-                main.get_history()[0]["status"],
-                "Running",
-            )
+            next(flow)
+            self.assertEqual(main.get_history(), [])
 
             flow.close()
             release_generation.set()
@@ -548,7 +557,7 @@ class HistoryTests(unittest.TestCase):
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
                 history = main.get_history()
-                if history[0]["status"] == "Completed":
+                if history:
                     break
                 time.sleep(0.01)
             else:

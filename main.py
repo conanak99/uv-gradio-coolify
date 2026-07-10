@@ -1,10 +1,12 @@
 import concurrent.futures
+from html import escape
 import os
 import queue
 import threading
 import time
 from collections.abc import Callable, Iterator
 from typing import Any, TypedDict
+from urllib.parse import quote, urlparse
 import uuid
 
 from clients import fal as fal_client
@@ -20,6 +22,7 @@ type ModelName = str
 type GalleryItem = tuple[ImageUrl, ModelName]
 type History = list["HistoryEntry"]
 type ProgressCallback = Callable[[list[GalleryItem]], None]
+type CompletedJob = tuple[str, list[GalleryItem]]
 
 
 class HistoryEntry(TypedDict):
@@ -30,8 +33,6 @@ class HistoryEntry(TypedDict):
     input_image: str | None
     outputs: list[GalleryItem]
     settings: str
-    status: str
-    error: str | None
 
 MODEL_MAP: dict[ModelName, str] = {
     "Qwen Image Edit": "fal-ai/qwen-image-edit-2511",
@@ -145,11 +146,12 @@ def get_history() -> History:
         ]
 
 
-def start_history_entry(
+def add_history_entry(
     *,
     operation: str,
     prompt: str,
     input_image: str | None,
+    outputs: list[GalleryItem],
     settings: str,
 ) -> str:
     entry: HistoryEntry = {
@@ -158,34 +160,12 @@ def start_history_entry(
         "operation": operation,
         "prompt": prompt,
         "input_image": input_image,
-        "outputs": [],
+        "outputs": list(outputs),
         "settings": settings,
-        "status": "Running",
-        "error": None,
     }
     with HISTORY_LOCK:
         HISTORY_STORE[:] = [entry, *HISTORY_STORE][:MAX_HISTORY_ITEMS]
     return entry["id"]
-
-
-def finish_history_entry(
-    entry_id: str,
-    *,
-    outputs: list[GalleryItem] | None = None,
-    error: str | None = None,
-) -> None:
-    with HISTORY_LOCK:
-        HISTORY_STORE[:] = [
-            {
-                **entry,
-                "outputs": list(outputs or []),
-                "status": "Failed" if error is not None else "Completed",
-                "error": error,
-            }
-            if entry["id"] == entry_id
-            else entry
-            for entry in HISTORY_STORE
-        ]
 
 
 def history_choices(history: History) -> list[tuple[str, str]]:
@@ -195,43 +175,86 @@ def history_choices(history: History) -> list[tuple[str, str]]:
         if len(prompt) > 60:
             prompt = f"{prompt[:57]}..."
         label = (
-            f'{entry["created_at"]} · {entry["status"]} · '
-            f'{entry["operation"]} · {prompt}'
+            f'{entry["created_at"]} · {entry["operation"]} · {prompt}'
         )
         choices.append((label, entry["id"]))
     return choices
 
 
+def history_media_source(media: str) -> str:
+    parsed = urlparse(media)
+    if parsed.scheme in {"http", "https"} or media.startswith("data:image/"):
+        return media
+    return f"/gradio_api/file={quote(media, safe='/')}"
+
+
+def history_image_html(media: str, caption: str) -> str:
+    source = escape(history_media_source(media), quote=True)
+    safe_caption = escape(caption)
+    return (
+        '<figure style="margin:0;min-width:0">'
+        f'<a href="{source}" target="_blank" rel="noopener noreferrer">'
+        f'<img src="{source}" alt="{safe_caption}" loading="lazy" '
+        'style="display:block;width:100%;max-height:60vh;object-fit:contain;'
+        'border-radius:8px;background:#f4f4f5">'
+        "</a>"
+        f'<figcaption style="margin-top:0.4rem">{safe_caption}</figcaption>'
+        "</figure>"
+    )
+
+
+def history_outputs_html(outputs: list[GalleryItem]) -> str:
+    if not outputs:
+        return "<p>No outputs yet.</p>"
+    images = "".join(
+        history_image_html(image_url, caption)
+        for image_url, caption in outputs
+    )
+    return (
+        '<div style="display:grid;grid-template-columns:'
+        'repeat(auto-fit,minmax(220px,1fr));gap:1rem">'
+        f"{images}</div>"
+    )
+
+
 def history_entry_view(
     history: History, entry_id: str | None
-) -> tuple[str, str, str | None, list[GalleryItem]]:
+) -> tuple[str, str, str, str]:
     if not history:
-        return "No history yet.", "", None, []
+        return "No history yet.", "", "", "<p>No outputs yet.</p>"
 
     entry = next(
         (item for item in history if item["id"] == entry_id),
         history[0],
     )
     details = (
-        f'**{entry["operation"]} · {entry["status"]}** · '
-        f'{entry["created_at"]}\n\n'
+        f'**{entry["operation"]}** · {entry["created_at"]}\n\n'
         f'{entry["settings"]}'
     )
-    if entry["error"]:
-        details += f'\n\nError: {entry["error"]}'
+    input_html = (
+        history_image_html(entry["input_image"], "Input image")
+        if entry["input_image"]
+        else "<p>No input image for this request.</p>"
+    )
     return (
         details,
         entry["prompt"],
-        entry["input_image"],
-        entry["outputs"],
+        input_html,
+        history_outputs_html(entry["outputs"]),
     )
 
 
 def history_view(
     history: History, entry_id: str | None = None
-) -> tuple[Any, str, str, str | None, list[GalleryItem]]:
+) -> tuple[Any, str, str, str, str]:
     if not history:
-        return gr.update(choices=[], value=None), "No history yet.", "", None, []
+        return (
+            gr.update(choices=[], value=None),
+            "No history yet.",
+            "",
+            "",
+            "<p>No outputs yet.</p>",
+        )
 
     selected_id = entry_id if any(
         item["id"] == entry_id for item in history
@@ -244,16 +267,26 @@ def history_view(
 
 def stored_history_entry_view(
     entry_id: str | None,
-) -> tuple[str, str, str | None, list[GalleryItem]]:
+) -> tuple[str, str, str, str]:
     return history_entry_view(get_history(), entry_id)
 
 
-def refresh_history() -> tuple[Any, str, str, str | None, list[GalleryItem]]:
+def refresh_history() -> tuple[Any, str, str, str, str]:
     return history_view(get_history())
 
 
+def unchanged_history_view() -> tuple[Any, Any, Any, Any, Any]:
+    return (
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+    )
+
+
 def iter_job_progress(
-    future: concurrent.futures.Future[list[GalleryItem]],
+    future: concurrent.futures.Future[Any],
     progress_queue: queue.Queue[list[GalleryItem]],
 ) -> Iterator[list[GalleryItem]]:
     while not future.done() or not progress_queue.empty():
@@ -264,24 +297,25 @@ def iter_job_progress(
 
 
 def run_edit_job(
-    entry_id: str,
     image_path: str,
     prompt: str,
     models: list[ModelName],
     progress_queue: queue.Queue[list[GalleryItem]],
-) -> list[GalleryItem]:
-    try:
-        results = edit_image(
-            image_path,
-            prompt,
-            models,
-            progress_queue.put,
-        )
-    except Exception as exc:
-        finish_history_entry(entry_id, error=str(exc))
-        raise
-    finish_history_entry(entry_id, outputs=results)
-    return results
+) -> CompletedJob:
+    results = edit_image(
+        image_path,
+        prompt,
+        models,
+        progress_queue.put,
+    )
+    entry_id = add_history_entry(
+        operation="Edit",
+        prompt=prompt,
+        input_image=image_path,
+        outputs=results,
+        settings=f'Models: {", ".join(models)}',
+    )
+    return entry_id, results
 
 
 def edit_image_flow(
@@ -289,16 +323,9 @@ def edit_image_flow(
     prompt: str,
     models: list[ModelName],
 ):
-    entry_id = start_history_entry(
-        operation="Edit",
-        prompt=prompt,
-        input_image=image_path,
-        settings=f'Models: {", ".join(models)}',
-    )
     progress_queue: queue.Queue[list[GalleryItem]] = queue.Queue()
     future = JOB_EXECUTOR.submit(
         run_edit_job,
-        entry_id,
         image_path,
         prompt,
         models,
@@ -307,21 +334,21 @@ def edit_image_flow(
     yield (
         gr.update(),
         gr.update(interactive=False, value="Editing..."),
-        *history_view(get_history(), entry_id),
+        *unchanged_history_view(),
     )
     for partial_results in iter_job_progress(future, progress_queue):
         yield (
             partial_results,
             gr.update(interactive=False, value="Editing..."),
-            *history_view(get_history(), entry_id),
+            *unchanged_history_view(),
         )
     try:
-        results = future.result()
+        entry_id, results = future.result()
     except BaseException:
         yield (
             gr.update(),
             gr.update(interactive=True, value="Edit Image"),
-            *history_view(get_history(), entry_id),
+            *unchanged_history_view(),
         )
         raise
 
@@ -412,26 +439,30 @@ def generate_image(
 
 
 def run_generate_job(
-    entry_id: str,
     prompt: str,
     models: list[ModelName],
     aspect_ratio: str,
     num_images: int,
     progress_queue: queue.Queue[list[GalleryItem]],
-) -> list[GalleryItem]:
-    try:
-        results = generate_image(
-            prompt,
-            models,
-            aspect_ratio,
-            num_images,
-            progress_queue.put,
-        )
-    except Exception as exc:
-        finish_history_entry(entry_id, error=str(exc))
-        raise
-    finish_history_entry(entry_id, outputs=results)
-    return results
+) -> CompletedJob:
+    results = generate_image(
+        prompt,
+        models,
+        aspect_ratio,
+        num_images,
+        progress_queue.put,
+    )
+    entry_id = add_history_entry(
+        operation="Generate",
+        prompt=prompt,
+        input_image=None,
+        outputs=results,
+        settings=(
+            f'Models: {", ".join(models)} · Aspect ratio: {aspect_ratio} · '
+            f"Images: {num_images}"
+        ),
+    )
+    return entry_id, results
 
 
 def generate_image_flow(
@@ -440,19 +471,9 @@ def generate_image_flow(
     aspect_ratio: str,
     num_images: str,
 ):
-    entry_id = start_history_entry(
-        operation="Generate",
-        prompt=prompt,
-        input_image=None,
-        settings=(
-            f'Models: {", ".join(models)} · Aspect ratio: {aspect_ratio} · '
-            f"Images: {num_images}"
-        ),
-    )
     progress_queue: queue.Queue[list[GalleryItem]] = queue.Queue()
     future = JOB_EXECUTOR.submit(
         run_generate_job,
-        entry_id,
         prompt,
         models,
         aspect_ratio,
@@ -462,21 +483,21 @@ def generate_image_flow(
     yield (
         gr.update(),
         gr.update(interactive=False, value="Generating..."),
-        *history_view(get_history(), entry_id),
+        *unchanged_history_view(),
     )
     for partial_results in iter_job_progress(future, progress_queue):
         yield (
             partial_results,
             gr.update(interactive=False, value="Generating..."),
-            *history_view(get_history(), entry_id),
+            *unchanged_history_view(),
         )
     try:
-        results = future.result()
+        entry_id, results = future.result()
     except BaseException:
         yield (
             gr.update(),
             gr.update(interactive=True, value="Generate"),
-            *history_view(get_history(), entry_id),
+            *unchanged_history_view(),
         )
         raise
 
@@ -555,16 +576,12 @@ with gr.Blocks(title="Image Studio") as demo:
                 interactive=False,
             )
             with gr.Row():
-                history_input = gr.Image(
-                    label="Input Image",
-                    interactive=False,
-                    height="40vh",
-                )
-                history_gallery = gr.Gallery(
-                    label="Outputs",
-                    columns=2,
-                    object_fit="contain",
-                )
+                with gr.Column():
+                    gr.Markdown("### Input Image")
+                    history_input = gr.HTML()
+                with gr.Column():
+                    gr.Markdown("### Outputs")
+                    history_gallery = gr.HTML("<p>No outputs yet.</p>")
 
     history_outputs = [
         history_selector,
@@ -592,6 +609,8 @@ with gr.Blocks(title="Image Studio") as demo:
             history_input,
             history_gallery,
         ],
+        queue=False,
+        show_progress="hidden",
     )
     history_refresh.click(
         fn=refresh_history,
@@ -602,6 +621,8 @@ with gr.Blocks(title="Image Studio") as demo:
             history_input,
             history_gallery,
         ],
+        queue=False,
+        show_progress="hidden",
     )
     demo.load(
         fn=refresh_history,
@@ -612,6 +633,8 @@ with gr.Blocks(title="Image Studio") as demo:
             history_input,
             history_gallery,
         ],
+        queue=False,
+        show_progress="hidden",
     )
 
 
