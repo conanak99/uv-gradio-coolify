@@ -259,17 +259,19 @@ def record_job(
             type(exc).__name__,
         )
         raise
+    duration_ms = elapsed_ms(started_at)
     entry_id = add_history_entry(
         operation=operation,
         prompt=prompt,
         input_image=input_image,
         outputs=results,
         settings=settings,
+        duration_ms=duration_ms,
     )
     logger.info(
         "job response operation=%s status=success duration_ms=%d images=%d history_id=%s",
         operation.lower(),
-        elapsed_ms(started_at),
+        duration_ms,
         len(results),
         entry_id,
     )

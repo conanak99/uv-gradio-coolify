@@ -585,6 +585,13 @@ class HistoryTests(unittest.TestCase):
         with history.HISTORY_LOCK:
             history.HISTORY_STORE.clear()
 
+    def test_format_duration_covers_seconds_and_minutes(self):
+        self.assertEqual(history.format_duration(0), "0.0s")
+        self.assertEqual(history.format_duration(900), "0.9s")
+        self.assertEqual(history.format_duration(12_300), "12.3s")
+        self.assertEqual(history.format_duration(65_000), "1m 05s")
+        self.assertEqual(history.format_duration(125_400), "2m 05s")
+
     def test_history_keeps_latest_ten_entries(self):
         for index in range(11):
             history.add_history_entry(
@@ -593,6 +600,7 @@ class HistoryTests(unittest.TestCase):
                 input_image=None,
                 outputs=[(f"https://image.test/{index}.png", "Model")],
                 settings="Aspect ratio: 1:1 · Images: 1",
+                duration_ms=1500,
             )
 
         entries = history.get_history()
@@ -608,6 +616,7 @@ class HistoryTests(unittest.TestCase):
                 input_image=None,
                 outputs=[("https://image.test/private.png", "Model")],
                 settings="Model: Test",
+                duration_ms=1500,
             )
 
         logs = "\n".join(captured_logs.output)
@@ -625,6 +634,7 @@ class HistoryTests(unittest.TestCase):
             input_image="/tmp/input.png",
             outputs=outputs,
             settings="Models: Edit Model",
+            duration_ms=12_300,
         )
         entries = history.get_history()
 
@@ -633,6 +643,7 @@ class HistoryTests(unittest.TestCase):
         )
 
         self.assertIn("Edit", details)
+        self.assertIn("took 12.3s", details)
         self.assertEqual(prompt, "Make it brighter")
         self.assertIn("/gradio_api/file=/tmp/input.png", input_html)
         self.assertIn("https://image.test/edited.png", outputs_html)
@@ -645,11 +656,14 @@ class HistoryTests(unittest.TestCase):
             input_image=None,
             outputs=[("https://image.test/shared.png", "Shared")],
             settings="Model: Shared",
+            duration_ms=65_000,
         )
 
         selector, details, prompt, input_html, outputs_html = history.refresh_history()
 
         self.assertEqual(selector["value"], entry_id)
+        self.assertIn("(1m 05s)", selector["choices"][0][0])
+        self.assertIn("took 1m 05s", details)
         self.assertEqual(prompt, "Visible on every device")
         self.assertIn("No input image", input_html)
         self.assertIn("https://image.test/shared.png", outputs_html)
@@ -727,6 +741,8 @@ class HistoryTests(unittest.TestCase):
         entries = history.get_history()
         self.assertEqual(entries[0]["operation"], "Generate")
         self.assertEqual(entries[0]["prompt"], "A lighthouse")
+        self.assertGreaterEqual(entries[0]["duration_ms"], 0)
+        self.assertIn("took ", final_update[3])
         self.assertIn(
             SEEDREAM_LITE_GENERATE,
             entries[0]["settings"],

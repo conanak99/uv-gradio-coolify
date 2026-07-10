@@ -23,6 +23,7 @@ class HistoryEntry(TypedDict):
     input_image: str | None
     outputs: list[GalleryItem]
     settings: str
+    duration_ms: int
 
 
 MAX_HISTORY_ITEMS = 10
@@ -45,6 +46,7 @@ def add_history_entry(
     input_image: str | None,
     outputs: list[GalleryItem],
     settings: str,
+    duration_ms: int,
 ) -> str:
     entry: HistoryEntry = {
         "id": uuid.uuid4().hex,
@@ -54,6 +56,7 @@ def add_history_entry(
         "input_image": input_image,
         "outputs": list(outputs),
         "settings": settings,
+        "duration_ms": duration_ms,
     }
     with HISTORY_LOCK:
         HISTORY_STORE[:] = [entry, *HISTORY_STORE][:MAX_HISTORY_ITEMS]
@@ -69,13 +72,22 @@ def add_history_entry(
     return entry["id"]
 
 
+def format_duration(duration_ms: int) -> str:
+    seconds = duration_ms / 1000
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, remaining_seconds = divmod(round(seconds), 60)
+    return f"{minutes}m {remaining_seconds:02d}s"
+
+
 def history_choices(history: History) -> list[tuple[str, str]]:
     choices: list[tuple[str, str]] = []
     for entry in history:
         prompt = " ".join(entry["prompt"].split())
         if len(prompt) > 60:
             prompt = f"{prompt[:57]}..."
-        label = f'{entry["created_at"]} · {entry["operation"]} · {prompt}'
+        duration = format_duration(entry["duration_ms"])
+        label = f'{entry["created_at"]} · {entry["operation"]} ({duration}) · {prompt}'
         choices.append((label, entry["id"]))
     return choices
 
@@ -127,7 +139,8 @@ def history_entry_view(
         history[0],
     )
     details = (
-        f'**{entry["operation"]}** · {entry["created_at"]}\n\n'
+        f'**{entry["operation"]}** · {entry["created_at"]} · '
+        f'took {format_duration(entry["duration_ms"])}\n\n'
         f'{entry["settings"]}'
     )
     input_html = (
