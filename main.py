@@ -17,6 +17,47 @@ from workflows import (
 
 load_dotenv()
 
+DEFAULT_EDIT_MODELS = list(MODEL_MAP.keys())
+DEFAULT_GENERATE_MODELS = list(GENERATE_MODEL_MAP.keys())
+BROWSER_STATE_SECRET = os.environ.get(
+    "BROWSER_STATE_SECRET",
+    "image-studio-browser-state-v1",
+)
+
+
+def valid_model_selection(
+    saved_selection: object,
+    available_models: list[str],
+) -> list[str]:
+    if not isinstance(saved_selection, list | tuple):
+        return list(available_models)
+
+    saved_models = {
+        model_name for model_name in saved_selection if isinstance(model_name, str)
+    }
+    selected_models = [
+        model_name for model_name in available_models if model_name in saved_models
+    ]
+    return selected_models or list(available_models)
+
+
+def load_model_preferences(
+    saved_edit_models: object,
+    saved_generate_models: object,
+) -> tuple[list[str], list[str]]:
+    return (
+        valid_model_selection(saved_edit_models, DEFAULT_EDIT_MODELS),
+        valid_model_selection(saved_generate_models, DEFAULT_GENERATE_MODELS),
+    )
+
+
+def save_edit_model_preference(selected_models: object) -> list[str]:
+    return valid_model_selection(selected_models, DEFAULT_EDIT_MODELS)
+
+
+def save_generate_model_preference(selected_models: object) -> list[str]:
+    return valid_model_selection(selected_models, DEFAULT_GENERATE_MODELS)
+
 log_level = getattr(
     logging,
     os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -43,6 +84,16 @@ PROMPT_CSS = """
 
 with gr.Blocks(title="Image Studio") as demo:
     gr.Markdown("# Image Studio")
+    edit_models_preference = gr.BrowserState(
+        DEFAULT_EDIT_MODELS,
+        storage_key="image-studio-edit-models",
+        secret=BROWSER_STATE_SECRET,
+    )
+    generate_models_preference = gr.BrowserState(
+        DEFAULT_GENERATE_MODELS,
+        storage_key="image-studio-generate-models",
+        secret=BROWSER_STATE_SECRET,
+    )
 
     with gr.Tabs():
         with gr.Tab("Edit"):
@@ -59,8 +110,8 @@ with gr.Blocks(title="Image Studio") as demo:
                         elem_classes=["prompt-input"],
                     )
                     models = gr.CheckboxGroup(
-                        choices=list(MODEL_MAP.keys()),
-                        value=list(MODEL_MAP.keys()),
+                        choices=DEFAULT_EDIT_MODELS,
+                        value=DEFAULT_EDIT_MODELS,
                         label="Models",
                     )
                     edit_btn = gr.Button("Edit Image", variant="primary")
@@ -81,8 +132,8 @@ with gr.Blocks(title="Image Studio") as demo:
                         elem_classes=["prompt-input"],
                     )
                     gen_models = gr.CheckboxGroup(
-                        choices=list(GENERATE_MODEL_MAP.keys()),
-                        value=list(GENERATE_MODEL_MAP.keys()),
+                        choices=DEFAULT_GENERATE_MODELS,
+                        value=DEFAULT_GENERATE_MODELS,
                         label="Models",
                     )
                     gen_ratio = gr.Radio(
@@ -140,10 +191,24 @@ with gr.Blocks(title="Image Studio") as demo:
         inputs=[input_image, edit_prompt, models],
         outputs=[edit_gallery, edit_btn, *history_outputs],
     )
+    models.change(
+        fn=save_edit_model_preference,
+        inputs=[models],
+        outputs=[edit_models_preference],
+        queue=False,
+        show_progress="hidden",
+    )
     gen_btn.click(
         fn=generate_image_flow,
         inputs=[gen_prompt, gen_models, gen_ratio, gen_num],
         outputs=[gen_gallery, gen_btn, *history_outputs],
+    )
+    gen_models.change(
+        fn=save_generate_model_preference,
+        inputs=[gen_models],
+        outputs=[generate_models_preference],
+        queue=False,
+        show_progress="hidden",
     )
     history_selector.change(
         fn=stored_history_entry_view,
@@ -178,6 +243,13 @@ with gr.Blocks(title="Image Studio") as demo:
             history_input,
             history_gallery,
         ],
+        queue=False,
+        show_progress="hidden",
+    )
+    demo.load(
+        fn=load_model_preferences,
+        inputs=[edit_models_preference, generate_models_preference],
+        outputs=[models, gen_models],
         queue=False,
         show_progress="hidden",
     )
