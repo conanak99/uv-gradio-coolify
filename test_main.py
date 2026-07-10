@@ -60,6 +60,47 @@ class NanoGptTests(unittest.TestCase):
                     "Improve the lighting",
                 )
 
+    def test_generate_images_sends_resolution_and_count(self):
+        response = io.BytesIO(
+            json.dumps(
+                {
+                    "data": [
+                        {"url": "https://image.test/one.png"},
+                        {"b64_json": "dHdv"},
+                    ]
+                }
+            ).encode()
+        )
+
+        with (
+            patch.dict(os.environ, {"NANO_GPT_KEY": "test-key"}),
+            patch.object(nano_gpt_api, "urlopen", return_value=response) as urlopen,
+        ):
+            results = nano_gpt_api.generate_images(
+                "seedream-v5.0-lite",
+                "A lighthouse",
+                "2560x1440",
+                2,
+            )
+
+        self.assertEqual(
+            results,
+            [
+                "https://image.test/one.png",
+                "data:image/png;base64,dHdv",
+            ],
+        )
+        payload = json.loads(urlopen.call_args.args[0].data)
+        self.assertEqual(
+            payload,
+            {
+                "model": "seedream-v5.0-lite",
+                "prompt": "A lighthouse",
+                "resolution": "2560x1440",
+                "n": 2,
+            },
+        )
+
 
 class FalClientTests(unittest.TestCase):
     def test_edit_image_builds_fal_request(self):
@@ -113,6 +154,90 @@ class ProviderRoutingTests(unittest.TestCase):
             "Improve the lighting",
         )
 
+    def test_seedream_generate_models_route_to_nano_gpt(self):
+        cases = [
+            (
+                main.SEEDREAM_LITE_GENERATE_MODEL,
+                "16:9",
+                "seedream-v5.0-lite",
+                "2560x1440",
+            ),
+            (
+                main.SEEDREAM_PRO_GENERATE_MODEL,
+                "3:4",
+                "bytedance/seedream-v5.0-pro",
+                "3:4",
+            ),
+        ]
+
+        for model_name, ratio, model_id, resolution in cases:
+            with (
+                self.subTest(model=model_name),
+                patch.object(
+                    main.nano_gpt_client,
+                    "generate_images",
+                    return_value=["https://image.test/generated.png"],
+                ) as generate_images,
+            ):
+                result = main.generate_image(
+                    "A lighthouse",
+                    model_name,
+                    ratio,
+                    2,
+                )
+
+                self.assertEqual(
+                    result,
+                    [
+                        (
+                            "https://image.test/generated.png",
+                            f"{model_name} ({ratio})",
+                        )
+                    ],
+                )
+                generate_images.assert_called_once_with(
+                    model_id,
+                    "A lighthouse",
+                    resolution,
+                    2,
+                )
+
+    def test_grok_generation_still_routes_to_fal(self):
+        with patch.object(
+            main.fal_client,
+            "generate_images",
+            return_value=["https://image.test/grok.png"],
+        ) as generate_images:
+            result = main.generate_image(
+                "A lighthouse",
+                main.GROK_GENERATE_MODEL,
+                "4:3",
+                1,
+            )
+
+        self.assertEqual(
+            result,
+            [
+                (
+                    "https://image.test/grok.png",
+                    f"{main.GROK_GENERATE_MODEL} (4:3)",
+                )
+            ],
+        )
+        generate_images.assert_called_once_with("A lighthouse", "4:3", 1)
+
+    def test_aspect_ratios_update_for_seedream_lite(self):
+        update = main.generation_aspect_ratio_update(
+            main.SEEDREAM_LITE_GENERATE_MODEL,
+            "3:4",
+        )
+
+        self.assertEqual(update["value"], "1:1")
+        self.assertEqual(
+            update["choices"],
+            ["16:9", "1:1", "9:16", "3:2", "2:3"],
+        )
+
 
 class HistoryTests(unittest.TestCase):
     def test_history_keeps_latest_ten_entries_without_mutating_input(self):
@@ -155,10 +280,25 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(selected_outputs, outputs)
 
     def test_generate_flow_adds_successful_request_to_history(self):
-        outputs = [("https://image.test/generated.png", "Grok Imagine (1:1)")]
+        outputs = [
+            (
+                "https://image.test/generated.png",
+                f"{main.SEEDREAM_LITE_GENERATE_MODEL} (1:1)",
+            )
+        ]
 
-        with patch.object(main, "generate_image", return_value=outputs):
-            updates = list(main.generate_image_flow("A lighthouse", "1:1", "1", []))
+        with patch.object(
+            main, "generate_image", return_value=outputs
+        ) as generate_image:
+            updates = list(
+                main.generate_image_flow(
+                    "A lighthouse",
+                    main.SEEDREAM_LITE_GENERATE_MODEL,
+                    "1:1",
+                    "1",
+                    [],
+                )
+            )
 
         self.assertEqual(len(updates), 2)
         final_update = updates[-1]
@@ -166,9 +306,19 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(final_update[0], outputs)
         self.assertEqual(final_update[2][0]["operation"], "Generate")
         self.assertEqual(final_update[2][0]["prompt"], "A lighthouse")
+        self.assertIn(
+            main.SEEDREAM_LITE_GENERATE_MODEL,
+            final_update[2][0]["settings"],
+        )
         self.assertEqual(final_update[5], "A lighthouse")
         self.assertIsNone(final_update[6])
         self.assertEqual(final_update[7], outputs)
+        generate_image.assert_called_once_with(
+            "A lighthouse",
+            main.SEEDREAM_LITE_GENERATE_MODEL,
+            "1:1",
+            1,
+        )
 
 
 if __name__ == "__main__":
