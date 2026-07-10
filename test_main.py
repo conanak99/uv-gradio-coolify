@@ -658,6 +658,17 @@ class UiConfigTests(unittest.TestCase):
         self.assertIn("font-size: 16px", main.PROMPT_CSS)
         self.assertIn(".history-select input", main.PROMPT_CSS)
 
+    def test_launch_allows_nano_output_cache(self):
+        with patch.object(main.demo, "launch") as launch:
+            main.launch_app(7860)
+
+        launch.assert_called_once_with(
+            server_name="0.0.0.0",
+            server_port=7860,
+            css=main.PROMPT_CSS,
+            allowed_paths=[str(nano_gpt_api.OUTPUT_CACHE_PATH)],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

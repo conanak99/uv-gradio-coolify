@@ -4,6 +4,7 @@ import os
 from dotenv import load_dotenv
 import gradio as gr
 
+from clients.nano_gpt import OUTPUT_CACHE_PATH
 from history import refresh_history, stored_history_entry_view
 from workflows import (
     GENERATE_ASPECT_RATIOS,
@@ -182,11 +183,16 @@ with gr.Blocks(title="Image Studio") as demo:
     )
 
 
-if __name__ == "__main__":
-    port_env = os.environ.get("PORT")
-    port = int(port_env) if port_env else None
-    demo.launch(
+def launch_app(port: int | None = None):
+    return demo.launch(
         server_name="0.0.0.0",
         server_port=port,
         css=PROMPT_CSS,
+        allowed_paths=[str(OUTPUT_CACHE_PATH)],
     )
+
+
+if __name__ == "__main__":
+    port_env = os.environ.get("PORT")
+    port = int(port_env) if port_env else None
+    launch_app(port)
