@@ -610,16 +610,24 @@ class HistoryTests(unittest.TestCase):
 
 
 class UiConfigTests(unittest.TestCase):
-    def test_prompt_inputs_use_ios_safe_font_size(self):
+    def test_form_controls_use_ios_safe_font_size(self):
         config = main.demo.get_config_file()
         prompt_inputs = [
             component
             for component in config["components"]
             if "prompt-input" in component.get("props", {}).get("elem_classes", [])
         ]
+        history_selects = [
+            component
+            for component in config["components"]
+            if "history-select"
+            in component.get("props", {}).get("elem_classes", [])
+        ]
 
         self.assertEqual(len(prompt_inputs), 2)
+        self.assertEqual(len(history_selects), 1)
         self.assertIn("font-size: 16px", main.PROMPT_CSS)
+        self.assertIn(".history-select input", main.PROMPT_CSS)
 
 
 if __name__ == "__main__":

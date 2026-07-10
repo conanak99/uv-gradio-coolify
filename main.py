@@ -33,6 +33,10 @@ PROMPT_CSS = """
 .prompt-input input {
     font-size: 16px !important;
 }
+.history-select input,
+.history-select select {
+    font-size: 16px !important;
+}
 """
 
 
@@ -105,6 +109,7 @@ with gr.Blocks(title="Image Studio") as demo:
                     choices=[],
                     label="Latest 10 requests",
                     interactive=True,
+                    elem_classes=["history-select"],
                 )
                 history_refresh = gr.Button("Refresh")
 
