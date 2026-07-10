@@ -4,6 +4,7 @@ import hashlib
 from io import BytesIO
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import tempfile
@@ -13,7 +14,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from image_utils import prepare_for_aspect_ratio, resize_if_needed
 
@@ -32,10 +33,70 @@ SEEDREAM_PRO_EDIT_ASPECT_RATIOS = (
     "4:3",
     "3:4",
 )
-MAX_INPUT_BYTES = 10 * 1024 * 1024
+# NanoGPT's endpoint runs behind a Vercel function with a 4.5 MB body limit.
+# Base64 expands binary data by roughly one third, so leave room for JSON.
+MAX_FUNCTION_BODY_BYTES = 4_500_000
+MAX_DATA_URL_IMAGE_BYTES = 3_000_000
+JPEG_QUALITY = 85
 OUTPUT_CACHE = tempfile.TemporaryDirectory(prefix="image-studio-nanogpt-")
 OUTPUT_CACHE_PATH = Path(OUTPUT_CACHE.name)
 OUTPUT_CACHE_LOCK = threading.Lock()
+
+
+def _jpeg_compatible_image(image_path: str) -> Image.Image:
+    with Image.open(image_path) as source:
+        oriented = ImageOps.exif_transpose(source)
+        try:
+            has_alpha = oriented.mode in {"RGBA", "LA"} or (
+                oriented.mode == "P" and "transparency" in oriented.info
+            )
+            if not has_alpha:
+                return oriented.convert("RGB")
+
+            rgba = oriented.convert("RGBA")
+            try:
+                flattened = Image.new("RGB", rgba.size, "white")
+                flattened.paste(rgba, mask=rgba.getchannel("A"))
+                return flattened
+            finally:
+                rgba.close()
+        finally:
+            if oriented is not source:
+                oriented.close()
+
+
+def _compressed_jpeg_bytes(image_path: str, max_bytes: int) -> bytes:
+    image = _jpeg_compatible_image(image_path)
+    try:
+        for _ in range(8):
+            output = BytesIO()
+            image.save(
+                output,
+                format="JPEG",
+                quality=JPEG_QUALITY,
+                optimize=True,
+            )
+            image_bytes = output.getvalue()
+            if len(image_bytes) <= max_bytes:
+                return image_bytes
+
+            scale = min(
+                0.9,
+                math.sqrt(max_bytes / len(image_bytes)) * 0.95,
+            )
+            new_size = (
+                max(64, int(image.width * scale)),
+                max(64, int(image.height * scale)),
+            )
+            if new_size == image.size:
+                break
+            resized = image.resize(new_size, Image.LANCZOS)
+            image.close()
+            image = resized
+    finally:
+        image.close()
+
+    raise RuntimeError("Could not compress NanoGPT input below the request limit.")
 
 
 def image_to_data_url(image_path: str) -> str:
@@ -44,8 +105,18 @@ def image_to_data_url(image_path: str) -> str:
         mime_type = Image.MIME.get(image.format or "", "image/png")
     with open(image_path, "rb") as image_file:
         image_bytes = image_file.read()
-    if len(image_bytes) > MAX_INPUT_BYTES:
-        raise RuntimeError("NanoGPT input image must be 10 MB or smaller after resizing.")
+    original_bytes = len(image_bytes)
+    if original_bytes > MAX_DATA_URL_IMAGE_BYTES:
+        image_bytes = _compressed_jpeg_bytes(
+            image_path,
+            MAX_DATA_URL_IMAGE_BYTES,
+        )
+        mime_type = "image/jpeg"
+        logger.info(
+            "input compressed original_bytes=%d compressed_bytes=%d",
+            original_bytes,
+            len(image_bytes),
+        )
 
     encoded = base64.b64encode(image_bytes).decode("ascii")
     return f"data:{mime_type};base64,{encoded}"

@@ -65,6 +65,42 @@ class NanoGptTests(unittest.TestCase):
         self.assertEqual(prefix, "data:image/jpeg;base64")
         self.assertTrue(base64.b64decode(encoded).startswith(b"\xff\xd8"))
 
+    def test_image_to_data_url_compresses_large_png_below_body_limit(self):
+        with tempfile.NamedTemporaryFile(suffix=".png") as image_file:
+            noisy_image = Image.frombytes(
+                "RGB",
+                (2048, 2048),
+                os.urandom(2048 * 2048 * 3),
+            )
+            try:
+                noisy_image.save(image_file, compress_level=0)
+            finally:
+                noisy_image.close()
+            image_file.flush()
+
+            data_url = nano_gpt_api.image_to_data_url(image_file.name)
+
+        prefix, encoded = data_url.split(",", 1)
+        image_bytes = base64.b64decode(encoded)
+        request_body = json.dumps(
+            {
+                "model": nano_gpt_api.SEEDREAM_PRO_EDIT_MODEL_ID,
+                "prompt": "Edit this image",
+                "imageDataUrl": data_url,
+                "size": "1:1",
+                "n": 1,
+            }
+        ).encode()
+        self.assertEqual(prefix, "data:image/jpeg;base64")
+        self.assertLessEqual(
+            len(image_bytes),
+            nano_gpt_api.MAX_DATA_URL_IMAGE_BYTES,
+        )
+        self.assertLess(
+            len(request_body),
+            nano_gpt_api.MAX_FUNCTION_BODY_BYTES,
+        )
+
     def test_run_nano_gpt_model_uses_env_key_and_edit_model(self):
         response = io.BytesIO(json.dumps({"data": [{"url": "https://image.test/out.png"}]}).encode())
 
