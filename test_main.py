@@ -170,6 +170,19 @@ class FalClientTests(unittest.TestCase):
 
 
 class ProviderRoutingTests(unittest.TestCase):
+    def test_elapsed_button_label_formats_seconds_and_minutes(self):
+        with patch.object(workflows.time, "monotonic", return_value=112.9):
+            self.assertEqual(
+                workflows.elapsed_button_label("Editing", 100.0),
+                "Editing... 12s",
+            )
+
+        with patch.object(workflows.time, "monotonic", return_value=165.0):
+            self.assertEqual(
+                workflows.elapsed_button_label("Generating", 100.0),
+                "Generating... 1m 05s",
+            )
+
     def test_seedream_routes_to_nano_gpt_client(self):
         with patch.object(
             workflows.nano_gpt_client,
@@ -492,6 +505,7 @@ class HistoryTests(unittest.TestCase):
                 )
             )
 
+        self.assertEqual(updates[0][1]["value"], "Generating... 0s")
         self.assertEqual(len(updates), 2)
         final_update = updates[-1]
         self.assertEqual(len(final_update), 7)
@@ -585,9 +599,10 @@ class HistoryTests(unittest.TestCase):
                 "Stream an edit",
                 ["First Edit", "Second Edit"],
             )
-            next(flow)
+            initial_update = next(flow)
             partial_update = next(flow)
 
+            self.assertEqual(initial_update[1]["value"], "Editing... 0s")
             self.assertEqual(partial_update[0], first_result)
             self.assertEqual(history.get_history(), [])
 

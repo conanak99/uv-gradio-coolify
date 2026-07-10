@@ -59,7 +59,15 @@ SEEDREAM_LITE_RESOLUTIONS = {
 }
 
 JOB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8)
-JOB_HEARTBEAT_SECONDS = 10.0
+JOB_HEARTBEAT_SECONDS = 1.0
+
+
+def elapsed_button_label(action: str, started_at: float) -> str:
+    elapsed_seconds = max(0, int(time.monotonic() - started_at))
+    minutes, seconds = divmod(elapsed_seconds, 60)
+    if minutes:
+        return f"{action}... {minutes}m {seconds:02d}s"
+    return f"{action}... {seconds}s"
 
 
 def run_model(
@@ -278,6 +286,7 @@ def edit_image_flow(
     prompt: str,
     models: list[ModelName],
 ):
+    started_at = time.monotonic()
     progress_queue: queue.Queue[list[GalleryItem]] = queue.Queue()
     future = JOB_EXECUTOR.submit(
         run_edit_job,
@@ -288,13 +297,19 @@ def edit_image_flow(
     )
     yield (
         gr.update(),
-        gr.update(interactive=False, value="Editing..."),
+        gr.update(
+            interactive=False,
+            value=elapsed_button_label("Editing", started_at),
+        ),
         *unchanged_history_view(),
     )
     for partial_results in iter_job_progress(future, progress_queue):
         yield (
             partial_results if partial_results is not None else gr.update(),
-            gr.update(interactive=False, value="Editing..."),
+            gr.update(
+                interactive=False,
+                value=elapsed_button_label("Editing", started_at),
+            ),
             *unchanged_history_view(),
         )
     try:
@@ -368,6 +383,7 @@ def generate_image_flow(
     aspect_ratio: str,
     num_images: str,
 ):
+    started_at = time.monotonic()
     progress_queue: queue.Queue[list[GalleryItem]] = queue.Queue()
     future = JOB_EXECUTOR.submit(
         run_generate_job,
@@ -379,13 +395,19 @@ def generate_image_flow(
     )
     yield (
         gr.update(),
-        gr.update(interactive=False, value="Generating..."),
+        gr.update(
+            interactive=False,
+            value=elapsed_button_label("Generating", started_at),
+        ),
         *unchanged_history_view(),
     )
     for partial_results in iter_job_progress(future, progress_queue):
         yield (
             partial_results if partial_results is not None else gr.update(),
-            gr.update(interactive=False, value="Generating..."),
+            gr.update(
+                interactive=False,
+                value=elapsed_button_label("Generating", started_at),
+            ),
             *unchanged_history_view(),
         )
     try:
