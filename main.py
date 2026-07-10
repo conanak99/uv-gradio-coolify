@@ -1,7 +1,10 @@
+from collections import OrderedDict
 import concurrent.futures
 import os
+import threading
 import time
 from typing import Any, TypedDict
+import uuid
 
 from clients import fal as fal_client
 from clients import nano_gpt as nano_gpt_client
@@ -25,6 +28,8 @@ class HistoryEntry(TypedDict):
     input_image: str | None
     outputs: list[GalleryItem]
     settings: str
+    status: str
+    error: str | None
 
 MODEL_MAP: dict[ModelName, str] = {
     "Qwen Image Edit": "fal-ai/qwen-image-edit-2511",
@@ -35,6 +40,10 @@ MODEL_MAP: dict[ModelName, str] = {
 
 NANO_GPT_MODELS = {"Seedream 5.0 Pro Edit (NanoGPT)"}
 MAX_HISTORY_ITEMS = 10
+MAX_HISTORY_CLIENTS = 100
+HISTORY_STORE: OrderedDict[str, History] = OrderedDict()
+HISTORY_LOCK = threading.Lock()
+JOB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
 GROK_GENERATE_MODEL = "Grok Imagine (fal.ai)"
 SEEDREAM_LITE_GENERATE_MODEL = "Seedream 5.0 Lite (NanoGPT)"
@@ -135,25 +144,76 @@ def edit_image(
     return results
 
 
-def add_history_entry(
-    history: History,
+def ensure_client_id(client_id: str | None) -> str:
+    if isinstance(client_id, str) and 0 < len(client_id) <= 128:
+        return client_id
+    return uuid.uuid4().hex
+
+
+def get_client_history(client_id: str | None) -> History:
+    if not client_id:
+        return []
+    with HISTORY_LOCK:
+        history = HISTORY_STORE.get(client_id, [])
+        if client_id in HISTORY_STORE:
+            HISTORY_STORE.move_to_end(client_id)
+        return [
+            {**entry, "outputs": list(entry["outputs"])}
+            for entry in history
+        ]
+
+
+def start_history_entry(
+    client_id: str,
     *,
     operation: str,
     prompt: str,
     input_image: str | None,
-    outputs: list[GalleryItem],
     settings: str,
-) -> History:
+) -> str:
     entry: HistoryEntry = {
-        "id": str(time.time_ns()),
+        "id": uuid.uuid4().hex,
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "operation": operation,
         "prompt": prompt,
         "input_image": input_image,
-        "outputs": list(outputs),
+        "outputs": [],
         "settings": settings,
+        "status": "Running",
+        "error": None,
     }
-    return [entry, *history][:MAX_HISTORY_ITEMS]
+    with HISTORY_LOCK:
+        history = HISTORY_STORE.get(client_id, [])
+        HISTORY_STORE[client_id] = [entry, *history][:MAX_HISTORY_ITEMS]
+        HISTORY_STORE.move_to_end(client_id)
+        while len(HISTORY_STORE) > MAX_HISTORY_CLIENTS:
+            HISTORY_STORE.popitem(last=False)
+    return entry["id"]
+
+
+def finish_history_entry(
+    client_id: str,
+    entry_id: str,
+    *,
+    outputs: list[GalleryItem] | None = None,
+    error: str | None = None,
+) -> None:
+    with HISTORY_LOCK:
+        history = HISTORY_STORE.get(client_id)
+        if history is None:
+            return
+        HISTORY_STORE[client_id] = [
+            {
+                **entry,
+                "outputs": list(outputs or []),
+                "status": "Failed" if error is not None else "Completed",
+                "error": error,
+            }
+            if entry["id"] == entry_id
+            else entry
+            for entry in history
+        ]
+        HISTORY_STORE.move_to_end(client_id)
 
 
 def history_choices(history: History) -> list[tuple[str, str]]:
@@ -162,7 +222,10 @@ def history_choices(history: History) -> list[tuple[str, str]]:
         prompt = " ".join(entry["prompt"].split())
         if len(prompt) > 60:
             prompt = f"{prompt[:57]}..."
-        label = f'{entry["created_at"]} · {entry["operation"]} · {prompt}'
+        label = (
+            f'{entry["created_at"]} · {entry["status"]} · '
+            f'{entry["operation"]} · {prompt}'
+        )
         choices.append((label, entry["id"]))
     return choices
 
@@ -178,9 +241,12 @@ def history_entry_view(
         history[0],
     )
     details = (
-        f'**{entry["operation"]}** · {entry["created_at"]}\n\n'
+        f'**{entry["operation"]} · {entry["status"]}** · '
+        f'{entry["created_at"]}\n\n'
         f'{entry["settings"]}'
     )
+    if entry["error"]:
+        details += f'\n\nError: {entry["error"]}'
     return (
         details,
         entry["prompt"],
@@ -204,52 +270,85 @@ def history_view(
     )
 
 
-def edit_image_flow(
-    image_path: str, prompt: str, models: list[ModelName], history: History
-):
-    # Disable the button while work is in flight; yielding ensures the UI
-    # reflects this state before the long-running call starts.
-    yield (
-        gr.update(),
-        gr.update(interactive=False, value="Editing..."),
-        history,
-        gr.update(),
-        gr.update(),
-        gr.update(),
-        gr.update(),
-        gr.update(),
-    )
+def initialize_client_history(
+    client_id: str | None,
+) -> tuple[str, Any, str, str, str | None, list[GalleryItem]]:
+    client_id = ensure_client_id(client_id)
+    return client_id, *history_view(get_client_history(client_id))
+
+
+def stored_history_entry_view(
+    client_id: str | None, entry_id: str | None
+) -> tuple[str, str, str | None, list[GalleryItem]]:
+    return history_entry_view(get_client_history(client_id), entry_id)
+
+
+def refresh_history(
+    client_id: str | None,
+) -> tuple[Any, str, str, str | None, list[GalleryItem]]:
+    return history_view(get_client_history(client_id))
+
+
+def run_edit_job(
+    client_id: str,
+    entry_id: str,
+    image_path: str,
+    prompt: str,
+    models: list[ModelName],
+) -> list[GalleryItem]:
     try:
         results = edit_image(image_path, prompt, models)
-    except BaseException:
-        # Re-enable the button on any failure (including gr.Error) so the UI
-        # doesn't get stuck in the "Editing..." state, then re-raise to let
-        # Gradio surface the error to the user.
-        yield (
-            gr.update(),
-            gr.update(interactive=True, value="Edit Image"),
-            history,
-            gr.update(),
-            gr.update(),
-            gr.update(),
-            gr.update(),
-            gr.update(),
-        )
+    except Exception as exc:
+        finish_history_entry(client_id, entry_id, error=str(exc))
         raise
+    finish_history_entry(client_id, entry_id, outputs=results)
+    return results
 
-    updated_history = add_history_entry(
-        history,
+
+def edit_image_flow(
+    image_path: str,
+    prompt: str,
+    models: list[ModelName],
+    client_id: str | None,
+):
+    client_id = ensure_client_id(client_id)
+    entry_id = start_history_entry(
+        client_id,
         operation="Edit",
         prompt=prompt,
         input_image=image_path,
-        outputs=results,
         settings=f'Models: {", ".join(models)}',
     )
+    future = JOB_EXECUTOR.submit(
+        run_edit_job,
+        client_id,
+        entry_id,
+        image_path,
+        prompt,
+        models,
+    )
+    yield (
+        gr.update(),
+        gr.update(interactive=False, value="Editing..."),
+        client_id,
+        *history_view(get_client_history(client_id), entry_id),
+    )
+    try:
+        results = future.result()
+    except BaseException:
+        yield (
+            gr.update(),
+            gr.update(interactive=True, value="Edit Image"),
+            client_id,
+            *history_view(get_client_history(client_id), entry_id),
+        )
+        raise
+
     yield (
         results,
         gr.update(interactive=True, value="Edit Image"),
-        updated_history,
-        *history_view(updated_history),
+        client_id,
+        *history_view(get_client_history(client_id), entry_id),
     )
 
 
@@ -285,65 +384,86 @@ def generate_image(
     return [(url, f"{model_name} ({aspect_ratio})") for url in image_urls]
 
 
-def generate_image_flow(
+def run_generate_job(
+    client_id: str,
+    entry_id: str,
     prompt: str,
     model_name: ModelName,
     aspect_ratio: str,
-    num_images: str,
-    history: History,
-):
-    yield (
-        gr.update(),
-        gr.update(interactive=False, value="Generating..."),
-        history,
-        gr.update(),
-        gr.update(),
-        gr.update(),
-        gr.update(),
-        gr.update(),
-    )
+    num_images: int,
+) -> list[GalleryItem]:
     try:
         results = generate_image(
             prompt,
             model_name,
             aspect_ratio,
-            int(num_images),
+            num_images,
         )
-    except BaseException:
-        yield (
-            gr.update(),
-            gr.update(interactive=True, value="Generate"),
-            history,
-            gr.update(),
-            gr.update(),
-            gr.update(),
-            gr.update(),
-            gr.update(),
-        )
+    except Exception as exc:
+        finish_history_entry(client_id, entry_id, error=str(exc))
         raise
+    finish_history_entry(client_id, entry_id, outputs=results)
+    return results
 
-    updated_history = add_history_entry(
-        history,
+
+def generate_image_flow(
+    prompt: str,
+    model_name: ModelName,
+    aspect_ratio: str,
+    num_images: str,
+    client_id: str | None,
+):
+    client_id = ensure_client_id(client_id)
+    entry_id = start_history_entry(
+        client_id,
         operation="Generate",
         prompt=prompt,
         input_image=None,
-        outputs=results,
         settings=(
             f"Model: {model_name} · Aspect ratio: {aspect_ratio} · "
             f"Images: {num_images}"
         ),
     )
+    future = JOB_EXECUTOR.submit(
+        run_generate_job,
+        client_id,
+        entry_id,
+        prompt,
+        model_name,
+        aspect_ratio,
+        int(num_images),
+    )
+    yield (
+        gr.update(),
+        gr.update(interactive=False, value="Generating..."),
+        client_id,
+        *history_view(get_client_history(client_id), entry_id),
+    )
+    try:
+        results = future.result()
+    except BaseException:
+        yield (
+            gr.update(),
+            gr.update(interactive=True, value="Generate"),
+            client_id,
+            *history_view(get_client_history(client_id), entry_id),
+        )
+        raise
+
     yield (
         results,
         gr.update(interactive=True, value="Generate"),
-        updated_history,
-        *history_view(updated_history),
+        client_id,
+        *history_view(get_client_history(client_id), entry_id),
     )
 
 
 with gr.Blocks(title="Image Studio") as demo:
     gr.Markdown("# Image Studio")
-    history_state = gr.State([])
+    client_id_state = gr.BrowserState(
+        default_value=None,
+        storage_key="image-studio-client-id",
+    )
 
     with gr.Tabs():
         with gr.Tab("Edit"):
@@ -422,7 +542,7 @@ with gr.Blocks(title="Image Studio") as demo:
                 )
 
     history_outputs = [
-        history_state,
+        client_id_state,
         history_selector,
         history_details,
         history_prompt,
@@ -431,12 +551,12 @@ with gr.Blocks(title="Image Studio") as demo:
     ]
     edit_btn.click(
         fn=edit_image_flow,
-        inputs=[input_image, edit_prompt, models, history_state],
+        inputs=[input_image, edit_prompt, models, client_id_state],
         outputs=[edit_gallery, edit_btn, *history_outputs],
     )
     gen_btn.click(
         fn=generate_image_flow,
-        inputs=[gen_prompt, gen_model, gen_ratio, gen_num, history_state],
+        inputs=[gen_prompt, gen_model, gen_ratio, gen_num, client_id_state],
         outputs=[gen_gallery, gen_btn, *history_outputs],
     )
     gen_model.change(
@@ -445,8 +565,8 @@ with gr.Blocks(title="Image Studio") as demo:
         outputs=[gen_ratio],
     )
     history_selector.change(
-        fn=history_entry_view,
-        inputs=[history_state, history_selector],
+        fn=stored_history_entry_view,
+        inputs=[client_id_state, history_selector],
         outputs=[
             history_details,
             history_prompt,
@@ -455,9 +575,21 @@ with gr.Blocks(title="Image Studio") as demo:
         ],
     )
     history_refresh.click(
-        fn=history_view,
-        inputs=[history_state],
+        fn=refresh_history,
+        inputs=[client_id_state],
         outputs=[
+            history_selector,
+            history_details,
+            history_prompt,
+            history_input,
+            history_gallery,
+        ],
+    )
+    demo.load(
+        fn=initialize_client_history,
+        inputs=[client_id_state],
+        outputs=[
+            client_id_state,
             history_selector,
             history_details,
             history_prompt,

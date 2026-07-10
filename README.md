@@ -20,7 +20,7 @@ Then open the URL printed in the terminal (defaults to <http://127.0.0.1:7860>).
 
 - **Image resizing**: Input images with any dimension larger than 2048px are automatically scaled down (preserving aspect ratio) before being sent to the model, which supports a maximum of 2048×2048.
 - **Generation models**: Generate with Grok Imagine, Seedream 5.0 Lite, or Seedream 5.0 Pro. Aspect-ratio choices update to match the selected model.
-- **History**: Each browser session keeps its latest 10 successful edit and generation requests in memory. History is cleared when the session or app restarts.
+- **History**: The server keeps each browser's latest 10 edit and generation jobs in memory. Background jobs continue after a client disconnects, and the same browser can reload or refresh the History tab to retrieve results. History is cleared when the app restarts.
 
 ## Configuration
 

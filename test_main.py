@@ -3,6 +3,8 @@ import io
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -240,41 +242,52 @@ class ProviderRoutingTests(unittest.TestCase):
 
 
 class HistoryTests(unittest.TestCase):
-    def test_history_keeps_latest_ten_entries_without_mutating_input(self):
-        history: main.History = []
+    def setUp(self):
+        with main.HISTORY_LOCK:
+            main.HISTORY_STORE.clear()
+
+    def test_history_keeps_latest_ten_entries(self):
+        client_id = "history-limit-client"
 
         for index in range(11):
-            previous_history = history
-            history = main.add_history_entry(
-                history,
+            entry_id = main.start_history_entry(
+                client_id,
                 operation="Generate",
                 prompt=f"Prompt {index}",
                 input_image=None,
-                outputs=[(f"https://image.test/{index}.png", "Model")],
                 settings="Aspect ratio: 1:1 · Images: 1",
             )
-            self.assertIsNot(history, previous_history)
+            main.finish_history_entry(
+                client_id,
+                entry_id,
+                outputs=[(f"https://image.test/{index}.png", "Model")],
+            )
 
+        history = main.get_client_history(client_id)
         self.assertEqual(len(history), 10)
         self.assertEqual(history[0]["prompt"], "Prompt 10")
         self.assertEqual(history[-1]["prompt"], "Prompt 1")
+        self.assertTrue(all(entry["status"] == "Completed" for entry in history))
 
     def test_history_entry_view_returns_selected_input_and_outputs(self):
         outputs = [("https://image.test/edited.png", "Edit Model")]
-        history = main.add_history_entry(
-            [],
+        client_id = "history-view-client"
+        entry_id = main.start_history_entry(
+            client_id,
             operation="Edit",
             prompt="Make it brighter",
             input_image="/tmp/input.png",
-            outputs=outputs,
             settings="Models: Edit Model",
         )
+        main.finish_history_entry(client_id, entry_id, outputs=outputs)
+        history = main.get_client_history(client_id)
 
         details, prompt, input_image, selected_outputs = main.history_entry_view(
-            history, history[0]["id"]
+            history, entry_id
         )
 
         self.assertIn("Edit", details)
+        self.assertIn("Completed", details)
         self.assertEqual(prompt, "Make it brighter")
         self.assertEqual(input_image, "/tmp/input.png")
         self.assertEqual(selected_outputs, outputs)
@@ -296,7 +309,7 @@ class HistoryTests(unittest.TestCase):
                     main.SEEDREAM_LITE_GENERATE_MODEL,
                     "1:1",
                     "1",
-                    [],
+                    "generate-history-client",
                 )
             )
 
@@ -304,11 +317,14 @@ class HistoryTests(unittest.TestCase):
         final_update = updates[-1]
         self.assertEqual(len(final_update), 8)
         self.assertEqual(final_update[0], outputs)
-        self.assertEqual(final_update[2][0]["operation"], "Generate")
-        self.assertEqual(final_update[2][0]["prompt"], "A lighthouse")
+        self.assertEqual(final_update[2], "generate-history-client")
+        history = main.get_client_history("generate-history-client")
+        self.assertEqual(history[0]["operation"], "Generate")
+        self.assertEqual(history[0]["status"], "Completed")
+        self.assertEqual(history[0]["prompt"], "A lighthouse")
         self.assertIn(
             main.SEEDREAM_LITE_GENERATE_MODEL,
-            final_update[2][0]["settings"],
+            history[0]["settings"],
         )
         self.assertEqual(final_update[5], "A lighthouse")
         self.assertIsNone(final_update[6])
@@ -319,6 +335,48 @@ class HistoryTests(unittest.TestCase):
             "1:1",
             1,
         )
+
+    def test_generation_completes_in_memory_after_client_disconnect(self):
+        release_generation = threading.Event()
+        outputs = [
+            (
+                "https://image.test/disconnected.png",
+                f"{main.SEEDREAM_PRO_GENERATE_MODEL} (1:1)",
+            )
+        ]
+
+        def delayed_generation(*_args):
+            release_generation.wait(timeout=2)
+            return outputs
+
+        with patch.object(main, "generate_image", side_effect=delayed_generation):
+            flow = main.generate_image_flow(
+                "A lighthouse after disconnect",
+                main.SEEDREAM_PRO_GENERATE_MODEL,
+                "1:1",
+                "1",
+                "disconnect-client",
+            )
+            first_update = next(flow)
+            self.assertEqual(first_update[2], "disconnect-client")
+            self.assertEqual(
+                main.get_client_history("disconnect-client")[0]["status"],
+                "Running",
+            )
+
+            flow.close()
+            release_generation.set()
+
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                history = main.get_client_history("disconnect-client")
+                if history[0]["status"] == "Completed":
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail("Background generation did not complete after disconnect")
+
+        self.assertEqual(history[0]["outputs"], outputs)
 
 
 if __name__ == "__main__":
