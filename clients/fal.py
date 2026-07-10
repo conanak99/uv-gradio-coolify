@@ -5,7 +5,6 @@ from typing import Any
 import fal_client
 
 from image_utils import resize_if_needed
-from model_catalog import GROK_GENERATE_MODEL_ID
 
 
 logger = logging.getLogger(__name__)

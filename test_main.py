@@ -37,7 +37,7 @@ class ImageUtilsTests(unittest.TestCase):
 
             result = image_utils.closest_aspect_ratio(
                 image_file.name,
-                nano_gpt_api.SEEDREAM_PRO_EDIT_ASPECT_RATIOS,
+                model_catalog.SEEDREAM_PRO_EDIT_ASPECT_RATIOS,
             )
 
         self.assertEqual(result, "3:2")
@@ -49,7 +49,7 @@ class ImageUtilsTests(unittest.TestCase):
 
             prepared_path, aspect_ratio = image_utils.prepare_for_aspect_ratio(
                 image_file.name,
-                nano_gpt_api.SEEDREAM_PRO_EDIT_ASPECT_RATIOS,
+                model_catalog.SEEDREAM_PRO_EDIT_ASPECT_RATIOS,
             )
             try:
                 with Image.open(image_file.name) as original:
@@ -110,7 +110,7 @@ class NanoGptTests(unittest.TestCase):
         image_bytes = base64.b64decode(encoded)
         request_body = json.dumps(
             {
-                "model": nano_gpt_api.SEEDREAM_PRO_EDIT_MODEL_ID,
+                "model": model_catalog.SEEDREAM_PRO_EDIT_MODEL_ID,
                 "prompt": "Edit this image",
                 "imageDataUrl": data_url,
                 "size": "1:1",
@@ -188,14 +188,14 @@ class NanoGptTests(unittest.TestCase):
             patch.object(nano_gpt_api, "urlopen", return_value=response) as urlopen,
         ):
             result = nano_gpt_api.edit_image(
-                nano_gpt_api.WAN_26_EDIT_MODEL_ID,
+                model_catalog.WAN_26_EDIT_MODEL_ID,
                 "/tmp/input.png",
                 "Change the jacket color",
             )
 
         self.assertEqual(result, "https://image.test/wan.png")
         payload = json.loads(urlopen.call_args.args[0].data)
-        self.assertEqual(payload["model"], nano_gpt_api.WAN_26_EDIT_MODEL_ID)
+        self.assertEqual(payload["model"], model_catalog.WAN_26_EDIT_MODEL_ID)
         self.assertEqual(payload["n"], 1)
         self.assertEqual(
             payload["imageDataUrl"], "data:image/jpeg;base64,aW1hZ2U="
@@ -350,13 +350,13 @@ class ProviderRoutingTests(unittest.TestCase):
         cases = [
             (
                 workflows.SEEDREAM_PRO_EDIT_MODEL,
-                nano_gpt_api.SEEDREAM_PRO_EDIT_MODEL_ID,
+                model_catalog.SEEDREAM_PRO_EDIT_MODEL_ID,
                 "/tmp/prepared.png",
                 {"size": "4:3"},
             ),
             (
                 workflows.WAN_26_EDIT_MODEL,
-                nano_gpt_api.WAN_26_EDIT_MODEL_ID,
+                model_catalog.WAN_26_EDIT_MODEL_ID,
                 "/tmp/input.png",
                 {},
             ),
@@ -398,7 +398,7 @@ class ProviderRoutingTests(unittest.TestCase):
                 if expected_kwargs:
                     prepare_for_aspect_ratio.assert_called_once_with(
                         "/tmp/input.png",
-                        nano_gpt_api.SEEDREAM_PRO_EDIT_ASPECT_RATIOS,
+                        model_catalog.SEEDREAM_PRO_EDIT_ASPECT_RATIOS,
                     )
                 else:
                     prepare_for_aspect_ratio.assert_not_called()
@@ -436,21 +436,21 @@ class ProviderRoutingTests(unittest.TestCase):
             (
                 workflows.WAN_27_GENERATE_MODEL,
                 "16:9",
-                nano_gpt_api.WAN_27_IMAGE_MODEL_ID,
+                model_catalog.WAN_27_IMAGE_MODEL_ID,
                 "1280*720",
                 "16:9",
             ),
             (
                 workflows.WAN_27_PRO_GENERATE_MODEL,
                 "4:3",
-                nano_gpt_api.WAN_27_IMAGE_PRO_MODEL_ID,
+                model_catalog.WAN_27_IMAGE_PRO_MODEL_ID,
                 "1536*1024",
                 "4:3 → 3:2",
             ),
             (
                 workflows.WAN_27_GENERATE_MODEL,
                 "3:4",
-                nano_gpt_api.WAN_27_IMAGE_MODEL_ID,
+                model_catalog.WAN_27_IMAGE_MODEL_ID,
                 "1024*1536",
                 "3:4 → 2:3",
             ),
@@ -511,7 +511,7 @@ class ProviderRoutingTests(unittest.TestCase):
             ],
         )
         generate_images.assert_called_once_with(
-            fal_api.GROK_GENERATE_MODEL_ID,
+            model_catalog.GROK_GENERATE_MODEL_ID,
             "A lighthouse",
             "4:3",
             1,

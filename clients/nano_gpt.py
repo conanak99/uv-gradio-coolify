@@ -17,13 +17,6 @@ from urllib.request import Request, urlopen
 from PIL import Image, ImageOps
 
 from image_utils import resize_if_needed
-from model_catalog import (
-    SEEDREAM_PRO_EDIT_ASPECT_RATIOS,
-    SEEDREAM_PRO_EDIT_MODEL_ID,
-    WAN_26_EDIT_MODEL_ID,
-    WAN_27_IMAGE_MODEL_ID,
-    WAN_27_IMAGE_PRO_MODEL_ID,
-)
 
 
 logger = logging.getLogger(__name__)

@@ -4,7 +4,7 @@ A minimal [Gradio](https://www.gradio.app/) "Hello World" app, packaged with [uv
 
 ## Requirements
 
-- Python >= 3.10
+- Python >= 3.12
 - [uv](https://docs.astral.sh/uv/) installed
 
 ## Run locally
