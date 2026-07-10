@@ -51,18 +51,13 @@ GENERATE_MODEL_MAP: dict[ModelName, str] = {
     SEEDREAM_LITE_GENERATE_MODEL: "seedream-v5.0-lite",
     SEEDREAM_PRO_GENERATE_MODEL: "bytedance/seedream-v5.0-pro",
 }
-GENERATE_ASPECT_RATIOS: dict[ModelName, list[str]] = {
-    GROK_GENERATE_MODEL: ["16:9", "4:3", "1:1", "3:4", "9:16"],
-    SEEDREAM_LITE_GENERATE_MODEL: ["16:9", "1:1", "9:16", "3:2", "2:3"],
-    SEEDREAM_PRO_GENERATE_MODEL: [
-        "16:9",
-        "4:3",
-        "1:1",
-        "3:4",
-        "9:16",
-        "3:2",
-        "2:3",
-    ],
+GENERATE_ASPECT_RATIOS = ["16:9", "4:3", "1:1", "3:4", "9:16"]
+SEEDREAM_LITE_RATIO_MAP = {
+    "16:9": "16:9",
+    "4:3": "3:2",
+    "1:1": "1:1",
+    "3:4": "2:3",
+    "9:16": "9:16",
 }
 SEEDREAM_LITE_RESOLUTIONS = {
     "1:1": "2048x2048",
@@ -71,14 +66,6 @@ SEEDREAM_LITE_RESOLUTIONS = {
     "3:2": "3072x2048",
     "2:3": "2048x3072",
 }
-
-
-def generation_aspect_ratio_update(
-    model_name: ModelName, current_ratio: str
-) -> Any:
-    choices = GENERATE_ASPECT_RATIOS[model_name]
-    value = current_ratio if current_ratio in choices else "1:1"
-    return gr.update(choices=choices, value=value)
 
 
 def run_model(
@@ -312,49 +299,93 @@ def edit_image_flow(
     )
 
 
-def generate_image(
+def run_generate_model(
     prompt: str,
     model_name: ModelName,
     aspect_ratio: str,
     num_images: int,
 ) -> list[GalleryItem]:
-    if not prompt:
-        raise gr.Error("Please provide a prompt.")
-    if model_name not in GENERATE_MODEL_MAP:
-        raise gr.Error("Please select a valid generation model.")
-    if aspect_ratio not in GENERATE_ASPECT_RATIOS[model_name]:
-        raise gr.Error(f"{model_name} does not support {aspect_ratio}.")
-
+    output_ratio = aspect_ratio
     if model_name == GROK_GENERATE_MODEL:
         image_urls = fal_client.generate_images(prompt, aspect_ratio, num_images)
     else:
-        resolution = (
-            SEEDREAM_LITE_RESOLUTIONS[aspect_ratio]
-            if model_name == SEEDREAM_LITE_GENERATE_MODEL
-            else aspect_ratio
-        )
+        if model_name == SEEDREAM_LITE_GENERATE_MODEL:
+            output_ratio = SEEDREAM_LITE_RATIO_MAP[aspect_ratio]
+            resolution = SEEDREAM_LITE_RESOLUTIONS[output_ratio]
+        else:
+            resolution = aspect_ratio
         image_urls = nano_gpt_client.generate_images(
             GENERATE_MODEL_MAP[model_name],
             prompt,
             resolution,
             num_images,
         )
-    if not image_urls:
-        raise gr.Error("No images returned from the model.")
-    return [(url, f"{model_name} ({aspect_ratio})") for url in image_urls]
+
+    ratio_label = (
+        aspect_ratio
+        if output_ratio == aspect_ratio
+        else f"{aspect_ratio} → {output_ratio}"
+    )
+    return [(url, f"{model_name} ({ratio_label})") for url in image_urls]
+
+
+def generate_image(
+    prompt: str,
+    models: list[ModelName],
+    aspect_ratio: str,
+    num_images: int,
+) -> list[GalleryItem]:
+    if not prompt:
+        raise gr.Error("Please provide a prompt.")
+    if not models:
+        raise gr.Error("Please select at least one generation model.")
+    if any(model not in GENERATE_MODEL_MAP for model in models):
+        raise gr.Error("Please select valid generation models.")
+    if aspect_ratio not in GENERATE_ASPECT_RATIOS:
+        raise gr.Error("Please select a valid aspect ratio.")
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures: dict[
+            concurrent.futures.Future[list[GalleryItem]], ModelName
+        ] = {
+            executor.submit(
+                run_generate_model,
+                prompt,
+                model_name,
+                aspect_ratio,
+                num_images,
+            ): model_name
+            for model_name in models
+        }
+        results: list[GalleryItem] = []
+        errors: list[str] = []
+        for future in concurrent.futures.as_completed(futures):
+            model_name = futures[future]
+            try:
+                results.extend(future.result())
+            except Exception as exc:
+                errors.append(f"{model_name}: {exc}")
+                print(f"[generate_image] {model_name} failed: {exc}")
+
+    if not results:
+        detail = "; ".join(errors) if errors else "no images returned"
+        raise gr.Error(f"All generation model calls failed ({detail}).")
+    if errors:
+        gr.Warning(f"Some generation models failed: {'; '.join(errors)}")
+    return results
 
 
 def run_generate_job(
     entry_id: str,
     prompt: str,
-    model_name: ModelName,
+    models: list[ModelName],
     aspect_ratio: str,
     num_images: int,
 ) -> list[GalleryItem]:
     try:
         results = generate_image(
             prompt,
-            model_name,
+            models,
             aspect_ratio,
             num_images,
         )
@@ -367,7 +398,7 @@ def run_generate_job(
 
 def generate_image_flow(
     prompt: str,
-    model_name: ModelName,
+    models: list[ModelName],
     aspect_ratio: str,
     num_images: str,
 ):
@@ -376,7 +407,7 @@ def generate_image_flow(
         prompt=prompt,
         input_image=None,
         settings=(
-            f"Model: {model_name} · Aspect ratio: {aspect_ratio} · "
+            f'Models: {", ".join(models)} · Aspect ratio: {aspect_ratio} · '
             f"Images: {num_images}"
         ),
     )
@@ -384,7 +415,7 @@ def generate_image_flow(
         run_generate_job,
         entry_id,
         prompt,
-        model_name,
+        models,
         aspect_ratio,
         int(num_images),
     )
@@ -441,13 +472,13 @@ with gr.Blocks(title="Image Studio") as demo:
                         label="Prompt",
                         placeholder="Describe the image you want to generate...",
                     )
-                    gen_model = gr.Radio(
+                    gen_models = gr.CheckboxGroup(
                         choices=list(GENERATE_MODEL_MAP.keys()),
-                        value=GROK_GENERATE_MODEL,
-                        label="Model",
+                        value=list(GENERATE_MODEL_MAP.keys()),
+                        label="Models",
                     )
                     gen_ratio = gr.Radio(
-                        choices=GENERATE_ASPECT_RATIOS[GROK_GENERATE_MODEL],
+                        choices=GENERATE_ASPECT_RATIOS,
                         value="3:4",
                         label="Aspect Ratio",
                     )
@@ -503,13 +534,8 @@ with gr.Blocks(title="Image Studio") as demo:
     )
     gen_btn.click(
         fn=generate_image_flow,
-        inputs=[gen_prompt, gen_model, gen_ratio, gen_num],
+        inputs=[gen_prompt, gen_models, gen_ratio, gen_num],
         outputs=[gen_gallery, gen_btn, *history_outputs],
-    )
-    gen_model.change(
-        fn=generation_aspect_ratio_update,
-        inputs=[gen_model, gen_ratio],
-        outputs=[gen_ratio],
     )
     history_selector.change(
         fn=stored_history_entry_view,
