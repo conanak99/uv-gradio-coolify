@@ -58,6 +58,10 @@ def save_edit_model_preference(selected_models: object) -> list[str]:
 def save_generate_model_preference(selected_models: object) -> list[str]:
     return valid_model_selection(selected_models, DEFAULT_GENERATE_MODELS)
 
+
+def edit_prompt_preference(saved_prompt: object) -> str:
+    return saved_prompt if isinstance(saved_prompt, str) else ""
+
 log_level = getattr(
     logging,
     os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -92,6 +96,11 @@ with gr.Blocks(title="Image Studio") as demo:
     generate_models_preference = gr.BrowserState(
         DEFAULT_GENERATE_MODELS,
         storage_key="image-studio-generate-models",
+        secret=BROWSER_STATE_SECRET,
+    )
+    edit_prompt_state = gr.BrowserState(
+        "",
+        storage_key="image-studio-edit-prompt",
         secret=BROWSER_STATE_SECRET,
     )
 
@@ -198,6 +207,13 @@ with gr.Blocks(title="Image Studio") as demo:
         queue=False,
         show_progress="hidden",
     )
+    edit_prompt.change(
+        fn=edit_prompt_preference,
+        inputs=[edit_prompt],
+        outputs=[edit_prompt_state],
+        queue=False,
+        show_progress="hidden",
+    )
     gen_btn.click(
         fn=generate_image_flow,
         inputs=[gen_prompt, gen_models, gen_ratio, gen_num],
@@ -250,6 +266,13 @@ with gr.Blocks(title="Image Studio") as demo:
         fn=load_model_preferences,
         inputs=[edit_models_preference, generate_models_preference],
         outputs=[models, gen_models],
+        queue=False,
+        show_progress="hidden",
+    )
+    demo.load(
+        fn=edit_prompt_preference,
+        inputs=[edit_prompt_state],
+        outputs=[edit_prompt],
         queue=False,
         show_progress="hidden",
     )

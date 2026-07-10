@@ -734,6 +734,15 @@ class UiConfigTests(unittest.TestCase):
             [generate_model],
         )
 
+    def test_edit_prompt_preference_round_trips_text(self):
+        self.assertEqual(
+            main.edit_prompt_preference("Make the background warmer"),
+            "Make the background warmer",
+        )
+
+    def test_edit_prompt_preference_ignores_invalid_state(self):
+        self.assertEqual(main.edit_prompt_preference(["not", "text"]), "")
+
     def test_form_controls_use_ios_safe_font_size(self):
         config = main.demo.get_config_file()
         prompt_inputs = [
