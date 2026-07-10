@@ -356,18 +356,20 @@ class ProviderRoutingTests(unittest.TestCase):
                     "Improve the lighting",
                 )
 
-    def test_seedream_generate_models_route_to_nano_gpt(self):
+    def test_nano_gpt_generate_models_route_to_nano_gpt(self):
         cases = [
             (
                 workflows.SEEDREAM_LITE_GENERATE_MODEL,
                 "16:9",
                 "seedream-v5.0-lite",
                 "2560x1440",
+                "16:9",
             ),
             (
                 workflows.SEEDREAM_PRO_GENERATE_MODEL,
                 "3:4",
                 "bytedance/seedream-v5.0-pro",
+                "3:4",
                 "3:4",
             ),
             (
@@ -375,16 +377,39 @@ class ProviderRoutingTests(unittest.TestCase):
                 "4:3",
                 "seedream-v5.0-lite",
                 "3072x2048",
+                "4:3 → 3:2",
             ),
             (
                 workflows.SEEDREAM_LITE_GENERATE_MODEL,
                 "3:4",
                 "seedream-v5.0-lite",
                 "2048x3072",
+                "3:4 → 2:3",
+            ),
+            (
+                workflows.WAN_27_GENERATE_MODEL,
+                "16:9",
+                nano_gpt_api.WAN_27_IMAGE_MODEL_ID,
+                "1280*720",
+                "16:9",
+            ),
+            (
+                workflows.WAN_27_PRO_GENERATE_MODEL,
+                "4:3",
+                nano_gpt_api.WAN_27_IMAGE_PRO_MODEL_ID,
+                "1536*1024",
+                "4:3 → 3:2",
+            ),
+            (
+                workflows.WAN_27_GENERATE_MODEL,
+                "3:4",
+                nano_gpt_api.WAN_27_IMAGE_MODEL_ID,
+                "1024*1536",
+                "3:4 → 2:3",
             ),
         ]
 
-        for model_name, ratio, model_id, resolution in cases:
+        for model_name, ratio, model_id, resolution, expected_ratio in cases:
             with (
                 self.subTest(model=model_name),
                 patch.object(
@@ -400,14 +425,6 @@ class ProviderRoutingTests(unittest.TestCase):
                     2,
                 )
 
-                expected_ratio = {
-                    "4:3": "4:3 → 3:2",
-                    "3:4": (
-                        "3:4 → 2:3"
-                        if model_name == workflows.SEEDREAM_LITE_GENERATE_MODEL
-                        else "3:4"
-                    ),
-                }.get(ratio, ratio)
                 self.assertEqual(
                     result,
                     [
