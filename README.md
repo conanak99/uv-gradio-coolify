@@ -25,6 +25,8 @@ Then open the URL printed in the terminal (defaults to <http://127.0.0.1:7860>).
 | Env var | Default | Description |
 | --- | --- | --- |
 | `PORT` | auto (`7860` if free) | Port the Gradio server binds to. Most PaaS platforms inject this automatically. |
+| `FAL_KEY` | — | fal.ai API key used by the fal.ai edit and generation models. |
+| `NANO_GPT_KEY` | — | NanoGPT API key used by the Seedream 5.0 Pro Edit model. |
 
 ## Deploying
 
