@@ -4,6 +4,7 @@ import io
 import json
 import os
 import queue
+import re
 import tempfile
 import threading
 import time
@@ -326,6 +327,30 @@ class ModelRegistryTests(unittest.TestCase):
 
 
 class ProviderRoutingTests(unittest.TestCase):
+    def test_format_duration_covers_seconds_and_minutes(self):
+        self.assertEqual(workflows.format_duration(0), "0.0s")
+        self.assertEqual(workflows.format_duration(900), "0.9s")
+        self.assertEqual(workflows.format_duration(12_300), "12.3s")
+        self.assertEqual(workflows.format_duration(65_000), "1m 05s")
+        self.assertEqual(workflows.format_duration(125_400), "2m 05s")
+
+    def test_run_timed_task_appends_model_duration_to_captions(self):
+        with patch.object(workflows, "elapsed_ms", return_value=12_300):
+            results = workflows.run_timed_task(
+                lambda: [
+                    ("https://image.test/a.png", "Model A"),
+                    ("https://image.test/b.png", "Model B"),
+                ]
+            )
+
+        self.assertEqual(
+            results,
+            [
+                ("https://image.test/a.png", "Model A · 12.3s"),
+                ("https://image.test/b.png", "Model B · 12.3s"),
+            ],
+        )
+
     def test_elapsed_button_label_formats_seconds_and_minutes(self):
         with patch.object(workflows.time, "monotonic", return_value=112.9):
             self.assertEqual(
@@ -472,6 +497,8 @@ class ProviderRoutingTests(unittest.TestCase):
             )
 
         self.assertEqual(len(results), 3)
+        for _image_url, caption in results:
+            self.assertRegex(caption, r" · \d+\.\ds$")
         self.assertEqual(
             [len(update) for update in progress_updates],
             [1, 2, 3],
@@ -541,7 +568,12 @@ class ProviderRoutingTests(unittest.TestCase):
                 image_url=" https://image.test/input.png ",
             )
 
-        self.assertEqual(result, [("https://image.test/output.png", model_name)])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][0], "https://image.test/output.png")
+        self.assertRegex(
+            result[0][1],
+            rf"^{re.escape(model_name)} · \d+\.\ds$",
+        )
         upload_image.assert_not_called()
         run_edit_model.assert_called_once_with(
             models.EDIT_MODELS[model_name],
@@ -569,8 +601,11 @@ class ProviderRoutingTests(unittest.TestCase):
                 image_url="https://image.test/input.png",
             )
 
-        self.assertEqual(
-            result, [("https://image.test/output.png", SEEDREAM_PRO_EDIT)]
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][0], "https://image.test/output.png")
+        self.assertRegex(
+            result[0][1],
+            rf"^{re.escape(SEEDREAM_PRO_EDIT)} · \d+\.\ds$",
         )
         download_image_url.assert_called_once_with("https://image.test/input.png")
         run_edit_model.assert_called_once_with(
@@ -585,13 +620,6 @@ class HistoryTests(unittest.TestCase):
         with history.HISTORY_LOCK:
             history.HISTORY_STORE.clear()
 
-    def test_format_duration_covers_seconds_and_minutes(self):
-        self.assertEqual(history.format_duration(0), "0.0s")
-        self.assertEqual(history.format_duration(900), "0.9s")
-        self.assertEqual(history.format_duration(12_300), "12.3s")
-        self.assertEqual(history.format_duration(65_000), "1m 05s")
-        self.assertEqual(history.format_duration(125_400), "2m 05s")
-
     def test_history_keeps_latest_ten_entries(self):
         for index in range(11):
             history.add_history_entry(
@@ -600,7 +628,6 @@ class HistoryTests(unittest.TestCase):
                 input_image=None,
                 outputs=[(f"https://image.test/{index}.png", "Model")],
                 settings="Aspect ratio: 1:1 · Images: 1",
-                duration_ms=1500,
             )
 
         entries = history.get_history()
@@ -616,7 +643,6 @@ class HistoryTests(unittest.TestCase):
                 input_image=None,
                 outputs=[("https://image.test/private.png", "Model")],
                 settings="Model: Test",
-                duration_ms=1500,
             )
 
         logs = "\n".join(captured_logs.output)
@@ -634,7 +660,6 @@ class HistoryTests(unittest.TestCase):
             input_image="/tmp/input.png",
             outputs=outputs,
             settings="Models: Edit Model",
-            duration_ms=12_300,
         )
         entries = history.get_history()
 
@@ -643,7 +668,6 @@ class HistoryTests(unittest.TestCase):
         )
 
         self.assertIn("Edit", details)
-        self.assertIn("took 12.3s", details)
         self.assertEqual(prompt, "Make it brighter")
         self.assertIn("/gradio_api/file=/tmp/input.png", input_html)
         self.assertIn("https://image.test/edited.png", outputs_html)
@@ -656,14 +680,11 @@ class HistoryTests(unittest.TestCase):
             input_image=None,
             outputs=[("https://image.test/shared.png", "Shared")],
             settings="Model: Shared",
-            duration_ms=65_000,
         )
 
         selector, details, prompt, input_html, outputs_html = history.refresh_history()
 
         self.assertEqual(selector["value"], entry_id)
-        self.assertIn("(1m 05s)", selector["choices"][0][0])
-        self.assertIn("took 1m 05s", details)
         self.assertEqual(prompt, "Visible on every device")
         self.assertIn("No input image", input_html)
         self.assertIn("https://image.test/shared.png", outputs_html)
@@ -741,8 +762,6 @@ class HistoryTests(unittest.TestCase):
         entries = history.get_history()
         self.assertEqual(entries[0]["operation"], "Generate")
         self.assertEqual(entries[0]["prompt"], "A lighthouse")
-        self.assertGreaterEqual(entries[0]["duration_ms"], 0)
-        self.assertIn("took ", final_update[3])
         self.assertIn(
             SEEDREAM_LITE_GENERATE,
             entries[0]["settings"],
