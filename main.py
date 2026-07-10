@@ -1,7 +1,9 @@
 import concurrent.futures
 import os
+import threading
 import time
 from typing import Any, TypedDict
+import uuid
 
 from clients import fal as fal_client
 from clients import nano_gpt as nano_gpt_client
@@ -25,6 +27,8 @@ class HistoryEntry(TypedDict):
     input_image: str | None
     outputs: list[GalleryItem]
     settings: str
+    status: str
+    error: str | None
 
 MODEL_MAP: dict[ModelName, str] = {
     "Qwen Image Edit": "fal-ai/qwen-image-edit-2511",
@@ -35,6 +39,47 @@ MODEL_MAP: dict[ModelName, str] = {
 
 NANO_GPT_MODELS = {"Seedream 5.0 Pro Edit (NanoGPT)"}
 MAX_HISTORY_ITEMS = 10
+HISTORY_STORE: History = []
+HISTORY_LOCK = threading.Lock()
+JOB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+
+GROK_GENERATE_MODEL = "Grok Imagine (fal.ai)"
+SEEDREAM_LITE_GENERATE_MODEL = "Seedream 5.0 Lite (NanoGPT)"
+SEEDREAM_PRO_GENERATE_MODEL = "Seedream 5.0 Pro (NanoGPT)"
+GENERATE_MODEL_MAP: dict[ModelName, str] = {
+    GROK_GENERATE_MODEL: fal_client.GROK_GENERATE_MODEL_ID,
+    SEEDREAM_LITE_GENERATE_MODEL: "seedream-v5.0-lite",
+    SEEDREAM_PRO_GENERATE_MODEL: "bytedance/seedream-v5.0-pro",
+}
+GENERATE_ASPECT_RATIOS: dict[ModelName, list[str]] = {
+    GROK_GENERATE_MODEL: ["16:9", "4:3", "1:1", "3:4", "9:16"],
+    SEEDREAM_LITE_GENERATE_MODEL: ["16:9", "1:1", "9:16", "3:2", "2:3"],
+    SEEDREAM_PRO_GENERATE_MODEL: [
+        "16:9",
+        "4:3",
+        "1:1",
+        "3:4",
+        "9:16",
+        "3:2",
+        "2:3",
+    ],
+}
+SEEDREAM_LITE_RESOLUTIONS = {
+    "1:1": "2048x2048",
+    "16:9": "2560x1440",
+    "9:16": "1440x2560",
+    "3:2": "3072x2048",
+    "2:3": "2048x3072",
+}
+
+
+def generation_aspect_ratio_update(
+    model_name: ModelName, current_ratio: str
+) -> Any:
+    choices = GENERATE_ASPECT_RATIOS[model_name]
+    value = current_ratio if current_ratio in choices else "1:1"
+    return gr.update(choices=choices, value=value)
+
 
 def run_model(
     model_name: ModelName, image_reference: ImageReference, prompt: str
@@ -97,25 +142,55 @@ def edit_image(
     return results
 
 
-def add_history_entry(
-    history: History,
+def get_history() -> History:
+    with HISTORY_LOCK:
+        return [
+            {**entry, "outputs": list(entry["outputs"])}
+            for entry in HISTORY_STORE
+        ]
+
+
+def start_history_entry(
     *,
     operation: str,
     prompt: str,
     input_image: str | None,
-    outputs: list[GalleryItem],
     settings: str,
-) -> History:
+) -> str:
     entry: HistoryEntry = {
-        "id": str(time.time_ns()),
+        "id": uuid.uuid4().hex,
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "operation": operation,
         "prompt": prompt,
         "input_image": input_image,
-        "outputs": list(outputs),
+        "outputs": [],
         "settings": settings,
+        "status": "Running",
+        "error": None,
     }
-    return [entry, *history][:MAX_HISTORY_ITEMS]
+    with HISTORY_LOCK:
+        HISTORY_STORE[:] = [entry, *HISTORY_STORE][:MAX_HISTORY_ITEMS]
+    return entry["id"]
+
+
+def finish_history_entry(
+    entry_id: str,
+    *,
+    outputs: list[GalleryItem] | None = None,
+    error: str | None = None,
+) -> None:
+    with HISTORY_LOCK:
+        HISTORY_STORE[:] = [
+            {
+                **entry,
+                "outputs": list(outputs or []),
+                "status": "Failed" if error is not None else "Completed",
+                "error": error,
+            }
+            if entry["id"] == entry_id
+            else entry
+            for entry in HISTORY_STORE
+        ]
 
 
 def history_choices(history: History) -> list[tuple[str, str]]:
@@ -124,7 +199,10 @@ def history_choices(history: History) -> list[tuple[str, str]]:
         prompt = " ".join(entry["prompt"].split())
         if len(prompt) > 60:
             prompt = f"{prompt[:57]}..."
-        label = f'{entry["created_at"]} · {entry["operation"]} · {prompt}'
+        label = (
+            f'{entry["created_at"]} · {entry["status"]} · '
+            f'{entry["operation"]} · {prompt}'
+        )
         choices.append((label, entry["id"]))
     return choices
 
@@ -140,9 +218,12 @@ def history_entry_view(
         history[0],
     )
     details = (
-        f'**{entry["operation"]}** · {entry["created_at"]}\n\n'
+        f'**{entry["operation"]} · {entry["status"]}** · '
+        f'{entry["created_at"]}\n\n'
         f'{entry["settings"]}'
     )
+    if entry["error"]:
+        details += f'\n\nError: {entry["error"]}'
     return (
         details,
         entry["prompt"],
@@ -166,112 +247,171 @@ def history_view(
     )
 
 
-def edit_image_flow(
-    image_path: str, prompt: str, models: list[ModelName], history: History
-):
-    # Disable the button while work is in flight; yielding ensures the UI
-    # reflects this state before the long-running call starts.
-    yield (
-        gr.update(),
-        gr.update(interactive=False, value="Editing..."),
-        history,
-        gr.update(),
-        gr.update(),
-        gr.update(),
-        gr.update(),
-        gr.update(),
-    )
+def stored_history_entry_view(
+    entry_id: str | None,
+) -> tuple[str, str, str | None, list[GalleryItem]]:
+    return history_entry_view(get_history(), entry_id)
+
+
+def refresh_history() -> tuple[Any, str, str, str | None, list[GalleryItem]]:
+    return history_view(get_history())
+
+
+def run_edit_job(
+    entry_id: str,
+    image_path: str,
+    prompt: str,
+    models: list[ModelName],
+) -> list[GalleryItem]:
     try:
         results = edit_image(image_path, prompt, models)
-    except BaseException:
-        # Re-enable the button on any failure (including gr.Error) so the UI
-        # doesn't get stuck in the "Editing..." state, then re-raise to let
-        # Gradio surface the error to the user.
-        yield (
-            gr.update(),
-            gr.update(interactive=True, value="Edit Image"),
-            history,
-            gr.update(),
-            gr.update(),
-            gr.update(),
-            gr.update(),
-            gr.update(),
-        )
+    except Exception as exc:
+        finish_history_entry(entry_id, error=str(exc))
         raise
+    finish_history_entry(entry_id, outputs=results)
+    return results
 
-    updated_history = add_history_entry(
-        history,
+
+def edit_image_flow(
+    image_path: str,
+    prompt: str,
+    models: list[ModelName],
+):
+    entry_id = start_history_entry(
         operation="Edit",
         prompt=prompt,
         input_image=image_path,
-        outputs=results,
         settings=f'Models: {", ".join(models)}',
     )
+    future = JOB_EXECUTOR.submit(
+        run_edit_job,
+        entry_id,
+        image_path,
+        prompt,
+        models,
+    )
+    yield (
+        gr.update(),
+        gr.update(interactive=False, value="Editing..."),
+        *history_view(get_history(), entry_id),
+    )
+    try:
+        results = future.result()
+    except BaseException:
+        yield (
+            gr.update(),
+            gr.update(interactive=True, value="Edit Image"),
+            *history_view(get_history(), entry_id),
+        )
+        raise
+
     yield (
         results,
         gr.update(interactive=True, value="Edit Image"),
-        updated_history,
-        *history_view(updated_history),
+        *history_view(get_history(), entry_id),
     )
 
 
-def generate_image(prompt: str, aspect_ratio: str, num_images: int) -> list[GalleryItem]:
+def generate_image(
+    prompt: str,
+    model_name: ModelName,
+    aspect_ratio: str,
+    num_images: int,
+) -> list[GalleryItem]:
     if not prompt:
         raise gr.Error("Please provide a prompt.")
+    if model_name not in GENERATE_MODEL_MAP:
+        raise gr.Error("Please select a valid generation model.")
+    if aspect_ratio not in GENERATE_ASPECT_RATIOS[model_name]:
+        raise gr.Error(f"{model_name} does not support {aspect_ratio}.")
 
-    image_urls = fal_client.generate_images(prompt, aspect_ratio, num_images)
+    if model_name == GROK_GENERATE_MODEL:
+        image_urls = fal_client.generate_images(prompt, aspect_ratio, num_images)
+    else:
+        resolution = (
+            SEEDREAM_LITE_RESOLUTIONS[aspect_ratio]
+            if model_name == SEEDREAM_LITE_GENERATE_MODEL
+            else aspect_ratio
+        )
+        image_urls = nano_gpt_client.generate_images(
+            GENERATE_MODEL_MAP[model_name],
+            prompt,
+            resolution,
+            num_images,
+        )
     if not image_urls:
         raise gr.Error("No images returned from the model.")
-    return [(url, f"Grok Imagine ({aspect_ratio})") for url in image_urls]
+    return [(url, f"{model_name} ({aspect_ratio})") for url in image_urls]
+
+
+def run_generate_job(
+    entry_id: str,
+    prompt: str,
+    model_name: ModelName,
+    aspect_ratio: str,
+    num_images: int,
+) -> list[GalleryItem]:
+    try:
+        results = generate_image(
+            prompt,
+            model_name,
+            aspect_ratio,
+            num_images,
+        )
+    except Exception as exc:
+        finish_history_entry(entry_id, error=str(exc))
+        raise
+    finish_history_entry(entry_id, outputs=results)
+    return results
 
 
 def generate_image_flow(
-    prompt: str, aspect_ratio: str, num_images: str, history: History
+    prompt: str,
+    model_name: ModelName,
+    aspect_ratio: str,
+    num_images: str,
 ):
+    entry_id = start_history_entry(
+        operation="Generate",
+        prompt=prompt,
+        input_image=None,
+        settings=(
+            f"Model: {model_name} · Aspect ratio: {aspect_ratio} · "
+            f"Images: {num_images}"
+        ),
+    )
+    future = JOB_EXECUTOR.submit(
+        run_generate_job,
+        entry_id,
+        prompt,
+        model_name,
+        aspect_ratio,
+        int(num_images),
+    )
     yield (
         gr.update(),
         gr.update(interactive=False, value="Generating..."),
-        history,
-        gr.update(),
-        gr.update(),
-        gr.update(),
-        gr.update(),
-        gr.update(),
+        *history_view(get_history(), entry_id),
     )
     try:
-        results = generate_image(prompt, aspect_ratio, int(num_images))
+        results = future.result()
     except BaseException:
         yield (
             gr.update(),
             gr.update(interactive=True, value="Generate"),
-            history,
-            gr.update(),
-            gr.update(),
-            gr.update(),
-            gr.update(),
-            gr.update(),
+            *history_view(get_history(), entry_id),
         )
         raise
 
-    updated_history = add_history_entry(
-        history,
-        operation="Generate",
-        prompt=prompt,
-        input_image=None,
-        outputs=results,
-        settings=f"Aspect ratio: {aspect_ratio} · Images: {num_images}",
-    )
     yield (
         results,
         gr.update(interactive=True, value="Generate"),
-        updated_history,
-        *history_view(updated_history),
+        *history_view(get_history(), entry_id),
     )
 
 
 with gr.Blocks(title="Image Studio") as demo:
     gr.Markdown("# Image Studio")
-    history_state = gr.State([])
 
     with gr.Tabs():
         with gr.Tab("Edit"):
@@ -301,8 +441,13 @@ with gr.Blocks(title="Image Studio") as demo:
                         label="Prompt",
                         placeholder="Describe the image you want to generate...",
                     )
+                    gen_model = gr.Radio(
+                        choices=list(GENERATE_MODEL_MAP.keys()),
+                        value=GROK_GENERATE_MODEL,
+                        label="Model",
+                    )
                     gen_ratio = gr.Radio(
-                        choices=["16:9", "4:3", "1:1", "3:4", "9:16"],
+                        choices=GENERATE_ASPECT_RATIOS[GROK_GENERATE_MODEL],
                         value="3:4",
                         label="Aspect Ratio",
                     )
@@ -345,7 +490,6 @@ with gr.Blocks(title="Image Studio") as demo:
                 )
 
     history_outputs = [
-        history_state,
         history_selector,
         history_details,
         history_prompt,
@@ -354,17 +498,22 @@ with gr.Blocks(title="Image Studio") as demo:
     ]
     edit_btn.click(
         fn=edit_image_flow,
-        inputs=[input_image, edit_prompt, models, history_state],
+        inputs=[input_image, edit_prompt, models],
         outputs=[edit_gallery, edit_btn, *history_outputs],
     )
     gen_btn.click(
         fn=generate_image_flow,
-        inputs=[gen_prompt, gen_ratio, gen_num, history_state],
+        inputs=[gen_prompt, gen_model, gen_ratio, gen_num],
         outputs=[gen_gallery, gen_btn, *history_outputs],
     )
+    gen_model.change(
+        fn=generation_aspect_ratio_update,
+        inputs=[gen_model, gen_ratio],
+        outputs=[gen_ratio],
+    )
     history_selector.change(
-        fn=history_entry_view,
-        inputs=[history_state, history_selector],
+        fn=stored_history_entry_view,
+        inputs=[history_selector],
         outputs=[
             history_details,
             history_prompt,
@@ -373,8 +522,17 @@ with gr.Blocks(title="Image Studio") as demo:
         ],
     )
     history_refresh.click(
-        fn=history_view,
-        inputs=[history_state],
+        fn=refresh_history,
+        outputs=[
+            history_selector,
+            history_details,
+            history_prompt,
+            history_input,
+            history_gallery,
+        ],
+    )
+    demo.load(
+        fn=refresh_history,
         outputs=[
             history_selector,
             history_details,
