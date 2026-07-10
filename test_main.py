@@ -13,6 +13,7 @@ from PIL import Image
 from clients import fal as fal_api
 from clients import nano_gpt as nano_gpt_api
 import history
+import main
 import workflows
 
 
@@ -46,13 +47,15 @@ class NanoGptTests(unittest.TestCase):
 
         self.assertEqual(result, "https://image.test/out.png")
         request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, nano_gpt_api.IMAGE_EDITS_URL)
         self.assertEqual(request.headers["Authorization"], "Bearer test-key")
         payload = json.loads(request.data)
         self.assertEqual(payload["model"], "bytedance/seedream-v5.0-pro/edit")
         self.assertEqual(payload["n"], 1)
         self.assertEqual(
-            payload["input_references"], ["data:image/png;base64,aW1hZ2U="]
+            payload["imageDataUrl"], "data:image/png;base64,aW1hZ2U="
         )
+        self.assertNotIn("input_references", payload)
 
     def test_run_nano_gpt_model_requires_key(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -94,6 +97,10 @@ class NanoGptTests(unittest.TestCase):
             ],
         )
         payload = json.loads(urlopen.call_args.args[0].data)
+        self.assertEqual(
+            urlopen.call_args.args[0].full_url,
+            nano_gpt_api.IMAGES_URL,
+        )
         self.assertEqual(
             payload,
             {
@@ -565,6 +572,19 @@ class HistoryTests(unittest.TestCase):
                 self.fail("Background generation did not complete after disconnect")
 
         self.assertEqual(entries[0]["outputs"], outputs)
+
+
+class UiConfigTests(unittest.TestCase):
+    def test_prompt_inputs_use_ios_safe_font_size(self):
+        config = main.demo.get_config_file()
+        prompt_inputs = [
+            component
+            for component in config["components"]
+            if "prompt-input" in component.get("props", {}).get("elem_classes", [])
+        ]
+
+        self.assertEqual(len(prompt_inputs), 2)
+        self.assertIn("font-size: 16px", main.PROMPT_CSS)
 
 
 if __name__ == "__main__":
