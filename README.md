@@ -34,8 +34,8 @@ Then open the URL printed in the terminal (defaults to <http://127.0.0.1:7860>).
 
 ## Adding models and providers
 
-- Add edit or generation models to `MODEL_SPECS` in `model_catalog.py`. The UI choices, API IDs, provider routing, aspect-ratio mapping, and resolutions are derived from that catalog.
-- Provider HTTP/SDK details belong in `clients/`. When adding a provider, add its enum value and one routing branch for edit and/or generation in `workflows.py`.
+- Add edit or generation models to `MODEL_SPECS` in `model_catalog.py`. The UI choices, API IDs, provider routing, aspect-ratio mapping, and resolutions are derived from that catalog. Models that use a new request shape also need a small client method or routing branch.
+- Provider HTTP/SDK details belong in `clients/`. When adding a provider, add its enum value plus its input preparation and edit/generation routing branches in `workflows.py`.
 
 ## Deploying
 
