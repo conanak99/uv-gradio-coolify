@@ -1,7 +1,9 @@
 import base64
+import concurrent.futures
 import io
 import json
 import os
+import queue
 import tempfile
 import threading
 import time
@@ -440,6 +442,21 @@ class HistoryTests(unittest.TestCase):
                 list(flow)
 
         self.assertEqual(history.get_history(), [])
+
+    def test_job_progress_emits_heartbeat_while_waiting(self):
+        future: concurrent.futures.Future[list[history.GalleryItem]] = (
+            concurrent.futures.Future()
+        )
+        progress_queue: queue.Queue[list[history.GalleryItem]] = queue.Queue()
+        progress = workflows.iter_job_progress(
+            future,
+            progress_queue,
+            heartbeat_seconds=0.01,
+        )
+
+        self.assertIsNone(next(progress))
+        future.set_result([])
+        self.assertEqual(list(progress), [])
 
     def test_generate_flow_adds_successful_request_to_history(self):
         outputs = [

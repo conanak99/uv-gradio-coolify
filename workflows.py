@@ -59,6 +59,7 @@ SEEDREAM_LITE_RESOLUTIONS = {
 }
 
 JOB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+JOB_HEARTBEAT_SECONDS = 10.0
 
 
 def run_model(
@@ -214,12 +215,20 @@ def generate_image(
 def iter_job_progress(
     future: concurrent.futures.Future[Any],
     progress_queue: queue.Queue[list[GalleryItem]],
-) -> Iterator[list[GalleryItem]]:
+    heartbeat_seconds: float = JOB_HEARTBEAT_SECONDS,
+) -> Iterator[list[GalleryItem] | None]:
+    next_heartbeat = time.monotonic() + heartbeat_seconds
     while not future.done() or not progress_queue.empty():
+        timeout = max(0.0, min(0.5, next_heartbeat - time.monotonic()))
         try:
-            yield progress_queue.get(timeout=0.1)
+            results = progress_queue.get(timeout=timeout)
         except queue.Empty:
+            if time.monotonic() >= next_heartbeat:
+                yield None
+                next_heartbeat = time.monotonic() + heartbeat_seconds
             continue
+        yield results
+        next_heartbeat = time.monotonic() + heartbeat_seconds
 
 
 def run_edit_job(
@@ -284,7 +293,7 @@ def edit_image_flow(
     )
     for partial_results in iter_job_progress(future, progress_queue):
         yield (
-            partial_results,
+            partial_results if partial_results is not None else gr.update(),
             gr.update(interactive=False, value="Editing..."),
             *unchanged_history_view(),
         )
@@ -375,7 +384,7 @@ def generate_image_flow(
     )
     for partial_results in iter_job_progress(future, progress_queue):
         yield (
-            partial_results,
+            partial_results if partial_results is not None else gr.update(),
             gr.update(interactive=False, value="Generating..."),
             *unchanged_history_view(),
         )
