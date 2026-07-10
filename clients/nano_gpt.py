@@ -15,13 +15,23 @@ from urllib.request import Request, urlopen
 
 from PIL import Image
 
-from image_utils import resize_if_needed
+from image_utils import prepare_for_aspect_ratio, resize_if_needed
 
 
 logger = logging.getLogger(__name__)
 
 IMAGES_URL = "https://nano-gpt.com/api/v1/images"
 IMAGE_EDITS_URL = "https://nano-gpt.com/api/v1/images/edits"
+SEEDREAM_PRO_EDIT_MODEL_ID = "bytedance/seedream-v5.0-pro/edit"
+SEEDREAM_PRO_EDIT_ASPECT_RATIOS = (
+    "1:1",
+    "16:9",
+    "9:16",
+    "3:2",
+    "2:3",
+    "4:3",
+    "3:4",
+)
 MAX_INPUT_BYTES = 10 * 1024 * 1024
 OUTPUT_CACHE = tempfile.TemporaryDirectory(prefix="image-studio-nanogpt-")
 OUTPUT_CACHE_PATH = Path(OUTPUT_CACHE.name)
@@ -160,12 +170,19 @@ def _request_images(
 
 def edit_image(model_id: str, image_path: str, prompt: str) -> str | None:
     api_key = _api_key()
-    payload = {
+    prepared_path = image_path
+    payload: dict[str, Any] = {
         "model": model_id,
         "prompt": prompt,
-        "imageDataUrl": image_to_data_url(image_path),
         "n": 1,
     }
+    if model_id == SEEDREAM_PRO_EDIT_MODEL_ID:
+        prepared_path, aspect_ratio = prepare_for_aspect_ratio(
+            image_path,
+            SEEDREAM_PRO_EDIT_ASPECT_RATIOS,
+        )
+        payload["size"] = aspect_ratio
+    payload["imageDataUrl"] = image_to_data_url(prepared_path)
     image_urls = _request_images(payload, api_key, IMAGE_EDITS_URL)
     return image_urls[0] if image_urls else None
 
