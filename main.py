@@ -1,5 +1,7 @@
 import logging
 import os
+from html import escape
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 import gradio as gr
@@ -62,6 +64,28 @@ def save_generate_model_preference(selected_models: object) -> list[str]:
 def edit_prompt_preference(saved_prompt: object) -> str:
     return saved_prompt if isinstance(saved_prompt, str) else ""
 
+
+def preview_image_url(image_url: object) -> str:
+    if not isinstance(image_url, str) or not image_url.strip():
+        return "<p>Enter an image URL to preview it.</p>"
+
+    normalized_url = image_url.strip()
+    parsed_url = urlparse(normalized_url)
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        return "<p>Enter a valid http(s) image URL.</p>"
+
+    safe_url = escape(normalized_url, quote=True)
+    return (
+        '<figure style="margin:0">'
+        f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">'
+        f'<img src="{safe_url}" alt="Input image URL preview" loading="lazy" '
+        'style="display:block;width:100%;max-height:38vh;object-fit:contain;'
+        'border-radius:8px;background:#f4f4f5">'
+        "</a>"
+        '<figcaption style="margin-top:0.4rem">URL preview</figcaption>'
+        "</figure>"
+    )
+
 log_level = getattr(
     logging,
     os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -81,6 +105,10 @@ PROMPT_CSS = """
 }
 .history-select input,
 .history-select select {
+    font-size: 16px !important;
+}
+.image-url-input textarea,
+.image-url-input input {
     font-size: 16px !important;
 }
 """
@@ -108,11 +136,22 @@ with gr.Blocks(title="Image Studio") as demo:
         with gr.Tab("Edit"):
             with gr.Row():
                 with gr.Column():
-                    input_image = gr.Image(
-                        type="filepath",
-                        label="Input Image",
-                        height="50vh",
-                    )
+                    with gr.Row():
+                        with gr.Column(scale=2):
+                            input_image = gr.Image(
+                                type="filepath",
+                                label="Input Image",
+                                height="50vh",
+                            )
+                        with gr.Column(scale=1):
+                            input_image_url = gr.Textbox(
+                                label="Input Image URL",
+                                placeholder="https://example.com/image.png",
+                                elem_classes=["image-url-input"],
+                            )
+                            input_image_url_preview = gr.HTML(
+                                "<p>Enter an image URL to preview it.</p>"
+                            )
                     edit_prompt = gr.Textbox(
                         label="Edit Prompt",
                         placeholder="Describe what you want to change...",
@@ -197,8 +236,22 @@ with gr.Blocks(title="Image Studio") as demo:
     ]
     edit_btn.click(
         fn=edit_image_flow,
-        inputs=[input_image, edit_prompt, models],
+        inputs=[input_image, input_image_url, edit_prompt, models],
         outputs=[edit_gallery, edit_btn, *history_outputs],
+    )
+    input_image_url.change(
+        fn=preview_image_url,
+        inputs=[input_image_url],
+        outputs=[input_image_url_preview],
+        queue=False,
+        show_progress="hidden",
+    )
+    input_image_url.submit(
+        fn=preview_image_url,
+        inputs=[input_image_url],
+        outputs=[input_image_url_preview],
+        queue=False,
+        show_progress="hidden",
     )
     models.change(
         fn=save_edit_model_preference,

@@ -463,6 +463,70 @@ class ProviderRoutingTests(unittest.TestCase):
             [1, 2],
         )
 
+    def test_edit_image_requires_upload_or_url(self):
+        with self.assertRaisesRegex(Exception, "input image or image URL"):
+            workflows.edit_image(
+                None,
+                "Improve the lighting",
+                ["Qwen Image Edit"],
+            )
+
+    def test_edit_image_uses_remote_url_for_fal_without_upload(self):
+        models = ["Qwen Image Edit"]
+
+        with (
+            patch.object(workflows.fal_client, "upload_image") as upload_image,
+            patch.object(
+                workflows,
+                "run_model",
+                return_value=("https://image.test/output.png", models[0]),
+            ) as run_model,
+        ):
+            result = workflows.edit_image(
+                "/tmp/uploaded.png",
+                "Improve the lighting",
+                models,
+                image_url=" https://image.test/input.png ",
+            )
+
+        self.assertEqual(result, [("https://image.test/output.png", models[0])])
+        upload_image.assert_not_called()
+        run_model.assert_called_once_with(
+            models[0],
+            "https://image.test/input.png",
+            "Improve the lighting",
+        )
+
+    def test_edit_image_downloads_remote_url_for_nano_gpt(self):
+        model = "Seedream 5.0 Pro Edit (NanoGPT)"
+
+        with (
+            patch.object(
+                workflows,
+                "download_image_url",
+                return_value="/tmp/downloaded.png",
+            ) as download_image_url,
+            patch.object(
+                workflows,
+                "run_model",
+                return_value=("https://image.test/output.png", model),
+            ) as run_model,
+        ):
+            result = workflows.edit_image(
+                None,
+                "Improve the lighting",
+                [model],
+                image_url="https://image.test/input.png",
+            )
+
+        self.assertEqual(result, [("https://image.test/output.png", model)])
+        download_image_url.assert_called_once_with("https://image.test/input.png")
+        run_model.assert_called_once_with(
+            model,
+            "/tmp/downloaded.png",
+            "Improve the lighting",
+        )
+
 
 class HistoryTests(unittest.TestCase):
     def setUp(self):
@@ -685,7 +749,8 @@ class HistoryTests(unittest.TestCase):
         ]
         release_second_result = threading.Event()
 
-        def staged_edit(_path, _prompt, _models, progress_callback):
+        def staged_edit(_path, _prompt, _models, progress_callback, image_url=None):
+            self.assertIsNone(image_url)
             progress_callback(first_result)
             release_second_result.wait(timeout=2)
             progress_callback(all_results)
@@ -694,6 +759,7 @@ class HistoryTests(unittest.TestCase):
         with patch.object(workflows, "edit_image", side_effect=staged_edit):
             flow = workflows.edit_image_flow(
                 "/tmp/input.png",
+                None,
                 "Stream an edit",
                 ["First Edit", "Second Edit"],
             )
@@ -711,6 +777,35 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(remaining_updates[-1][0], all_results)
         completed_history = history.get_history()[0]
         self.assertEqual(completed_history["outputs"], all_results)
+
+    def test_edit_flow_stores_remote_url_in_history(self):
+        outputs = [("https://image.test/edited.png", "Qwen Image Edit")]
+
+        with patch.object(
+            workflows,
+            "edit_image",
+            return_value=outputs,
+        ) as edit_image:
+            updates = list(
+                workflows.edit_image_flow(
+                    None,
+                    "https://image.test/input.png",
+                    "Use a URL",
+                    ["Qwen Image Edit"],
+                )
+            )
+
+        edit_image.assert_called_once_with(
+            None,
+            "Use a URL",
+            ["Qwen Image Edit"],
+            ANY,
+            image_url="https://image.test/input.png",
+        )
+        entries = history.get_history()
+        self.assertEqual(entries[0]["input_image"], "https://image.test/input.png")
+        self.assertIn("https://image.test/input.png", updates[-1][5])
+        self.assertIn("https://image.test/edited.png", updates[-1][6])
 
     def test_generation_completes_in_memory_after_client_disconnect(self):
         release_generation = threading.Event()
@@ -796,6 +891,15 @@ class UiConfigTests(unittest.TestCase):
     def test_edit_prompt_preference_ignores_invalid_state(self):
         self.assertEqual(main.edit_prompt_preference(["not", "text"]), "")
 
+    def test_image_url_preview_renders_valid_http_urls(self):
+        preview = main.preview_image_url(" https://image.test/input.png ")
+
+        self.assertIn('src="https://image.test/input.png"', preview)
+        self.assertIn("URL preview", preview)
+
+    def test_image_url_preview_rejects_invalid_urls(self):
+        self.assertIn("valid http(s)", main.preview_image_url("not-a-url"))
+
     def test_form_controls_use_ios_safe_font_size(self):
         config = main.demo.get_config_file()
         prompt_inputs = [
@@ -809,12 +913,24 @@ class UiConfigTests(unittest.TestCase):
             if "history-select"
             in component.get("props", {}).get("elem_classes", [])
         ]
+        image_url_inputs = [
+            component
+            for component in config["components"]
+            if "image-url-input"
+            in component.get("props", {}).get("elem_classes", [])
+        ]
 
         self.assertEqual(len(prompt_inputs), 2)
         self.assertEqual(len(history_selects), 1)
+        self.assertEqual(len(image_url_inputs), 1)
+        self.assertEqual(
+            image_url_inputs[0]["props"]["label"],
+            "Input Image URL",
+        )
         self.assertTrue(history_selects[0]["props"]["allow_custom_value"])
         self.assertIn("font-size: 16px", main.PROMPT_CSS)
         self.assertIn(".history-select input", main.PROMPT_CSS)
+        self.assertIn(".image-url-input input", main.PROMPT_CSS)
 
     def test_launch_allows_nano_output_cache(self):
         with patch.object(main.demo, "launch") as launch:

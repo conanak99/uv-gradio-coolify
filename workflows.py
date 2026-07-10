@@ -4,6 +4,7 @@ import queue
 import time
 from collections.abc import Callable, Iterator
 from typing import Any
+from urllib.parse import urlparse
 
 from clients import fal as fal_client
 from clients import nano_gpt as nano_gpt_client
@@ -16,6 +17,7 @@ from history import (
     history_view,
     unchanged_history_view,
 )
+from image_utils import download_image_url
 
 
 logger = logging.getLogger(__name__)
@@ -64,6 +66,36 @@ JOB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 JOB_HEARTBEAT_SECONDS = 1.0
 
 
+def normalize_image_url(image_url: str | None) -> str | None:
+    if not image_url:
+        return None
+
+    normalized_url = image_url.strip()
+    if not normalized_url:
+        return None
+
+    parsed_url = urlparse(normalized_url)
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        raise gr.Error("Please provide a valid http(s) image URL.")
+    return normalized_url
+
+
+def select_edit_image_input(
+    image_path: str | None,
+    image_url: str | None = None,
+) -> ImageReference:
+    normalized_url = normalize_image_url(image_url)
+    if normalized_url:
+        return normalized_url
+    if image_path:
+        return image_path
+    raise gr.Error("Please provide an input image or image URL.")
+
+
+def is_remote_image_reference(image_reference: ImageReference) -> bool:
+    return urlparse(image_reference).scheme in {"http", "https"}
+
+
 def elapsed_button_label(action: str, started_at: float) -> str:
     elapsed_seconds = max(0, int(time.monotonic() - started_at))
     minutes, seconds = divmod(elapsed_seconds, 60)
@@ -84,27 +116,38 @@ def run_model(
 
 
 def edit_image(
-    image_path: str,
+    image_path: str | None,
     prompt: str,
     models: list[ModelName],
     progress_callback: ProgressCallback | None = None,
+    image_url: str | None = None,
 ) -> list[GalleryItem]:
-    if not image_path or not prompt:
-        raise gr.Error("Please provide both an image and a prompt.")
+    image_reference = select_edit_image_input(image_path, image_url)
+    if not prompt:
+        raise gr.Error("Please provide a prompt.")
     if not models:
         raise gr.Error("Please select at least one model.")
 
     image_references: dict[ModelName, ImageReference] = {}
     if any(model not in NANO_GPT_MODELS for model in models):
-        fal_image_url = fal_client.upload_image(image_path)
+        fal_image_url = (
+            image_reference
+            if is_remote_image_reference(image_reference)
+            else fal_client.upload_image(image_reference)
+        )
         image_references.update(
             (model, fal_image_url)
             for model in models
             if model not in NANO_GPT_MODELS
         )
     if any(model in NANO_GPT_MODELS for model in models):
+        nano_image_path = (
+            download_image_url(image_reference)
+            if is_remote_image_reference(image_reference)
+            else image_reference
+        )
         image_references.update(
-            (model, image_path) for model in models if model in NANO_GPT_MODELS
+            (model, nano_image_path) for model in models if model in NANO_GPT_MODELS
         )
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -242,12 +285,14 @@ def iter_job_progress(
 
 
 def run_edit_job(
-    image_path: str,
+    image_path: str | None,
+    image_url: str | None,
     prompt: str,
     models: list[ModelName],
     progress_queue: queue.Queue[list[GalleryItem]],
 ) -> CompletedJob:
     started_at = time.monotonic()
+    image_reference = select_edit_image_input(image_path, image_url)
     logger.info(
         "job request operation=edit models=%d prompt_chars=%d",
         len(models),
@@ -259,6 +304,7 @@ def run_edit_job(
             prompt,
             models,
             progress_queue.put,
+            image_url=image_url,
         )
     except Exception as exc:
         logger.error(
@@ -270,7 +316,7 @@ def run_edit_job(
     entry_id = add_history_entry(
         operation="Edit",
         prompt=prompt,
-        input_image=image_path,
+        input_image=image_reference,
         outputs=results,
         settings=f'Models: {", ".join(models)}',
     )
@@ -284,7 +330,8 @@ def run_edit_job(
 
 
 def edit_image_flow(
-    image_path: str,
+    image_path: str | None,
+    image_url: str | None,
     prompt: str,
     models: list[ModelName],
 ):
@@ -293,6 +340,7 @@ def edit_image_flow(
     future = JOB_EXECUTOR.submit(
         run_edit_job,
         image_path,
+        image_url,
         prompt,
         models,
         progress_queue,
