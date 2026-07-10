@@ -247,23 +247,19 @@ class HistoryTests(unittest.TestCase):
             main.HISTORY_STORE.clear()
 
     def test_history_keeps_latest_ten_entries(self):
-        client_id = "history-limit-client"
-
         for index in range(11):
             entry_id = main.start_history_entry(
-                client_id,
                 operation="Generate",
                 prompt=f"Prompt {index}",
                 input_image=None,
                 settings="Aspect ratio: 1:1 · Images: 1",
             )
             main.finish_history_entry(
-                client_id,
                 entry_id,
                 outputs=[(f"https://image.test/{index}.png", "Model")],
             )
 
-        history = main.get_client_history(client_id)
+        history = main.get_history()
         self.assertEqual(len(history), 10)
         self.assertEqual(history[0]["prompt"], "Prompt 10")
         self.assertEqual(history[-1]["prompt"], "Prompt 1")
@@ -271,16 +267,14 @@ class HistoryTests(unittest.TestCase):
 
     def test_history_entry_view_returns_selected_input_and_outputs(self):
         outputs = [("https://image.test/edited.png", "Edit Model")]
-        client_id = "history-view-client"
         entry_id = main.start_history_entry(
-            client_id,
             operation="Edit",
             prompt="Make it brighter",
             input_image="/tmp/input.png",
             settings="Models: Edit Model",
         )
-        main.finish_history_entry(client_id, entry_id, outputs=outputs)
-        history = main.get_client_history(client_id)
+        main.finish_history_entry(entry_id, outputs=outputs)
+        history = main.get_history()
 
         details, prompt, input_image, selected_outputs = main.history_entry_view(
             history, entry_id
@@ -291,6 +285,26 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(prompt, "Make it brighter")
         self.assertEqual(input_image, "/tmp/input.png")
         self.assertEqual(selected_outputs, outputs)
+
+    def test_refresh_exposes_shared_history(self):
+        entry_id = main.start_history_entry(
+            operation="Generate",
+            prompt="Visible on every device",
+            input_image=None,
+            settings="Model: Shared",
+        )
+        main.finish_history_entry(
+            entry_id,
+            outputs=[("https://image.test/shared.png", "Shared")],
+        )
+
+        selector, details, prompt, input_image, outputs = main.refresh_history()
+
+        self.assertEqual(selector["value"], entry_id)
+        self.assertIn("Completed", details)
+        self.assertEqual(prompt, "Visible on every device")
+        self.assertIsNone(input_image)
+        self.assertEqual(outputs, [("https://image.test/shared.png", "Shared")])
 
     def test_generate_flow_adds_successful_request_to_history(self):
         outputs = [
@@ -309,16 +323,14 @@ class HistoryTests(unittest.TestCase):
                     main.SEEDREAM_LITE_GENERATE_MODEL,
                     "1:1",
                     "1",
-                    "generate-history-client",
                 )
             )
 
         self.assertEqual(len(updates), 2)
         final_update = updates[-1]
-        self.assertEqual(len(final_update), 8)
+        self.assertEqual(len(final_update), 7)
         self.assertEqual(final_update[0], outputs)
-        self.assertEqual(final_update[2], "generate-history-client")
-        history = main.get_client_history("generate-history-client")
+        history = main.get_history()
         self.assertEqual(history[0]["operation"], "Generate")
         self.assertEqual(history[0]["status"], "Completed")
         self.assertEqual(history[0]["prompt"], "A lighthouse")
@@ -326,9 +338,9 @@ class HistoryTests(unittest.TestCase):
             main.SEEDREAM_LITE_GENERATE_MODEL,
             history[0]["settings"],
         )
-        self.assertEqual(final_update[5], "A lighthouse")
-        self.assertIsNone(final_update[6])
-        self.assertEqual(final_update[7], outputs)
+        self.assertEqual(final_update[4], "A lighthouse")
+        self.assertIsNone(final_update[5])
+        self.assertEqual(final_update[6], outputs)
         generate_image.assert_called_once_with(
             "A lighthouse",
             main.SEEDREAM_LITE_GENERATE_MODEL,
@@ -355,12 +367,10 @@ class HistoryTests(unittest.TestCase):
                 main.SEEDREAM_PRO_GENERATE_MODEL,
                 "1:1",
                 "1",
-                "disconnect-client",
             )
             first_update = next(flow)
-            self.assertEqual(first_update[2], "disconnect-client")
             self.assertEqual(
-                main.get_client_history("disconnect-client")[0]["status"],
+                main.get_history()[0]["status"],
                 "Running",
             )
 
@@ -369,7 +379,7 @@ class HistoryTests(unittest.TestCase):
 
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
-                history = main.get_client_history("disconnect-client")
+                history = main.get_history()
                 if history[0]["status"] == "Completed":
                     break
                 time.sleep(0.01)

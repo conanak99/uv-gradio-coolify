@@ -1,4 +1,3 @@
-from collections import OrderedDict
 import concurrent.futures
 import os
 import threading
@@ -40,8 +39,7 @@ MODEL_MAP: dict[ModelName, str] = {
 
 NANO_GPT_MODELS = {"Seedream 5.0 Pro Edit (NanoGPT)"}
 MAX_HISTORY_ITEMS = 10
-MAX_HISTORY_CLIENTS = 100
-HISTORY_STORE: OrderedDict[str, History] = OrderedDict()
+HISTORY_STORE: History = []
 HISTORY_LOCK = threading.Lock()
 JOB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
@@ -144,27 +142,15 @@ def edit_image(
     return results
 
 
-def ensure_client_id(client_id: str | None) -> str:
-    if isinstance(client_id, str) and 0 < len(client_id) <= 128:
-        return client_id
-    return uuid.uuid4().hex
-
-
-def get_client_history(client_id: str | None) -> History:
-    if not client_id:
-        return []
+def get_history() -> History:
     with HISTORY_LOCK:
-        history = HISTORY_STORE.get(client_id, [])
-        if client_id in HISTORY_STORE:
-            HISTORY_STORE.move_to_end(client_id)
         return [
             {**entry, "outputs": list(entry["outputs"])}
-            for entry in history
+            for entry in HISTORY_STORE
         ]
 
 
 def start_history_entry(
-    client_id: str,
     *,
     operation: str,
     prompt: str,
@@ -183,26 +169,18 @@ def start_history_entry(
         "error": None,
     }
     with HISTORY_LOCK:
-        history = HISTORY_STORE.get(client_id, [])
-        HISTORY_STORE[client_id] = [entry, *history][:MAX_HISTORY_ITEMS]
-        HISTORY_STORE.move_to_end(client_id)
-        while len(HISTORY_STORE) > MAX_HISTORY_CLIENTS:
-            HISTORY_STORE.popitem(last=False)
+        HISTORY_STORE[:] = [entry, *HISTORY_STORE][:MAX_HISTORY_ITEMS]
     return entry["id"]
 
 
 def finish_history_entry(
-    client_id: str,
     entry_id: str,
     *,
     outputs: list[GalleryItem] | None = None,
     error: str | None = None,
 ) -> None:
     with HISTORY_LOCK:
-        history = HISTORY_STORE.get(client_id)
-        if history is None:
-            return
-        HISTORY_STORE[client_id] = [
+        HISTORY_STORE[:] = [
             {
                 **entry,
                 "outputs": list(outputs or []),
@@ -211,9 +189,8 @@ def finish_history_entry(
             }
             if entry["id"] == entry_id
             else entry
-            for entry in history
+            for entry in HISTORY_STORE
         ]
-        HISTORY_STORE.move_to_end(client_id)
 
 
 def history_choices(history: History) -> list[tuple[str, str]]:
@@ -270,27 +247,17 @@ def history_view(
     )
 
 
-def initialize_client_history(
-    client_id: str | None,
-) -> tuple[str, Any, str, str, str | None, list[GalleryItem]]:
-    client_id = ensure_client_id(client_id)
-    return client_id, *history_view(get_client_history(client_id))
-
-
 def stored_history_entry_view(
-    client_id: str | None, entry_id: str | None
+    entry_id: str | None,
 ) -> tuple[str, str, str | None, list[GalleryItem]]:
-    return history_entry_view(get_client_history(client_id), entry_id)
+    return history_entry_view(get_history(), entry_id)
 
 
-def refresh_history(
-    client_id: str | None,
-) -> tuple[Any, str, str, str | None, list[GalleryItem]]:
-    return history_view(get_client_history(client_id))
+def refresh_history() -> tuple[Any, str, str, str | None, list[GalleryItem]]:
+    return history_view(get_history())
 
 
 def run_edit_job(
-    client_id: str,
     entry_id: str,
     image_path: str,
     prompt: str,
@@ -299,9 +266,9 @@ def run_edit_job(
     try:
         results = edit_image(image_path, prompt, models)
     except Exception as exc:
-        finish_history_entry(client_id, entry_id, error=str(exc))
+        finish_history_entry(entry_id, error=str(exc))
         raise
-    finish_history_entry(client_id, entry_id, outputs=results)
+    finish_history_entry(entry_id, outputs=results)
     return results
 
 
@@ -309,11 +276,8 @@ def edit_image_flow(
     image_path: str,
     prompt: str,
     models: list[ModelName],
-    client_id: str | None,
 ):
-    client_id = ensure_client_id(client_id)
     entry_id = start_history_entry(
-        client_id,
         operation="Edit",
         prompt=prompt,
         input_image=image_path,
@@ -321,7 +285,6 @@ def edit_image_flow(
     )
     future = JOB_EXECUTOR.submit(
         run_edit_job,
-        client_id,
         entry_id,
         image_path,
         prompt,
@@ -330,8 +293,7 @@ def edit_image_flow(
     yield (
         gr.update(),
         gr.update(interactive=False, value="Editing..."),
-        client_id,
-        *history_view(get_client_history(client_id), entry_id),
+        *history_view(get_history(), entry_id),
     )
     try:
         results = future.result()
@@ -339,16 +301,14 @@ def edit_image_flow(
         yield (
             gr.update(),
             gr.update(interactive=True, value="Edit Image"),
-            client_id,
-            *history_view(get_client_history(client_id), entry_id),
+            *history_view(get_history(), entry_id),
         )
         raise
 
     yield (
         results,
         gr.update(interactive=True, value="Edit Image"),
-        client_id,
-        *history_view(get_client_history(client_id), entry_id),
+        *history_view(get_history(), entry_id),
     )
 
 
@@ -385,7 +345,6 @@ def generate_image(
 
 
 def run_generate_job(
-    client_id: str,
     entry_id: str,
     prompt: str,
     model_name: ModelName,
@@ -400,9 +359,9 @@ def run_generate_job(
             num_images,
         )
     except Exception as exc:
-        finish_history_entry(client_id, entry_id, error=str(exc))
+        finish_history_entry(entry_id, error=str(exc))
         raise
-    finish_history_entry(client_id, entry_id, outputs=results)
+    finish_history_entry(entry_id, outputs=results)
     return results
 
 
@@ -411,11 +370,8 @@ def generate_image_flow(
     model_name: ModelName,
     aspect_ratio: str,
     num_images: str,
-    client_id: str | None,
 ):
-    client_id = ensure_client_id(client_id)
     entry_id = start_history_entry(
-        client_id,
         operation="Generate",
         prompt=prompt,
         input_image=None,
@@ -426,7 +382,6 @@ def generate_image_flow(
     )
     future = JOB_EXECUTOR.submit(
         run_generate_job,
-        client_id,
         entry_id,
         prompt,
         model_name,
@@ -436,8 +391,7 @@ def generate_image_flow(
     yield (
         gr.update(),
         gr.update(interactive=False, value="Generating..."),
-        client_id,
-        *history_view(get_client_history(client_id), entry_id),
+        *history_view(get_history(), entry_id),
     )
     try:
         results = future.result()
@@ -445,25 +399,19 @@ def generate_image_flow(
         yield (
             gr.update(),
             gr.update(interactive=True, value="Generate"),
-            client_id,
-            *history_view(get_client_history(client_id), entry_id),
+            *history_view(get_history(), entry_id),
         )
         raise
 
     yield (
         results,
         gr.update(interactive=True, value="Generate"),
-        client_id,
-        *history_view(get_client_history(client_id), entry_id),
+        *history_view(get_history(), entry_id),
     )
 
 
 with gr.Blocks(title="Image Studio") as demo:
     gr.Markdown("# Image Studio")
-    client_id_state = gr.BrowserState(
-        default_value=None,
-        storage_key="image-studio-client-id",
-    )
 
     with gr.Tabs():
         with gr.Tab("Edit"):
@@ -542,7 +490,6 @@ with gr.Blocks(title="Image Studio") as demo:
                 )
 
     history_outputs = [
-        client_id_state,
         history_selector,
         history_details,
         history_prompt,
@@ -551,12 +498,12 @@ with gr.Blocks(title="Image Studio") as demo:
     ]
     edit_btn.click(
         fn=edit_image_flow,
-        inputs=[input_image, edit_prompt, models, client_id_state],
+        inputs=[input_image, edit_prompt, models],
         outputs=[edit_gallery, edit_btn, *history_outputs],
     )
     gen_btn.click(
         fn=generate_image_flow,
-        inputs=[gen_prompt, gen_model, gen_ratio, gen_num, client_id_state],
+        inputs=[gen_prompt, gen_model, gen_ratio, gen_num],
         outputs=[gen_gallery, gen_btn, *history_outputs],
     )
     gen_model.change(
@@ -566,7 +513,7 @@ with gr.Blocks(title="Image Studio") as demo:
     )
     history_selector.change(
         fn=stored_history_entry_view,
-        inputs=[client_id_state, history_selector],
+        inputs=[history_selector],
         outputs=[
             history_details,
             history_prompt,
@@ -576,7 +523,6 @@ with gr.Blocks(title="Image Studio") as demo:
     )
     history_refresh.click(
         fn=refresh_history,
-        inputs=[client_id_state],
         outputs=[
             history_selector,
             history_details,
@@ -586,10 +532,8 @@ with gr.Blocks(title="Image Studio") as demo:
         ],
     )
     demo.load(
-        fn=initialize_client_history,
-        inputs=[client_id_state],
+        fn=refresh_history,
         outputs=[
-            client_id_state,
             history_selector,
             history_details,
             history_prompt,
