@@ -33,15 +33,19 @@ MAX_DIMENSION = 2048
 
 
 def resize_if_needed(image_path: str) -> str:
-    img = Image.open(image_path)
-    w, h = img.size
-    if w <= MAX_DIMENSION and h <= MAX_DIMENSION:
-        return image_path
-    scale = MAX_DIMENSION / max(w, h)
-    new_size = (int(w * scale), int(h * scale))
-    img = img.resize(new_size, Image.LANCZOS)
+    with Image.open(image_path) as image:
+        w, h = image.size
+        if w <= MAX_DIMENSION and h <= MAX_DIMENSION:
+            return image_path
+        scale = MAX_DIMENSION / max(w, h)
+        new_size = (int(w * scale), int(h * scale))
+        resized_image = image.resize(new_size, Image.LANCZOS)
+
     resized_path = image_path + "_resized.png"
-    img.save(resized_path)
+    try:
+        resized_image.save(resized_path)
+    finally:
+        resized_image.close()
     return resized_path
 
 
