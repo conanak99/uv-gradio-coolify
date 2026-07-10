@@ -43,12 +43,20 @@ NANO_GPT_MODELS = {SEEDREAM_PRO_EDIT_MODEL, WAN_26_EDIT_MODEL}
 GROK_GENERATE_MODEL = "Grok Imagine (fal.ai)"
 SEEDREAM_LITE_GENERATE_MODEL = "Seedream 5.0 Lite (NanoGPT)"
 SEEDREAM_PRO_GENERATE_MODEL = "Seedream 5.0 Pro (NanoGPT)"
+WAN_27_GENERATE_MODEL = "WAN 2.7 Image (NanoGPT)"
+WAN_27_PRO_GENERATE_MODEL = "WAN 2.7 Image Pro (NanoGPT)"
 GENERATE_MODEL_MAP: dict[ModelName, str] = {
     GROK_GENERATE_MODEL: fal_client.GROK_GENERATE_MODEL_ID,
     SEEDREAM_LITE_GENERATE_MODEL: "seedream-v5.0-lite",
     SEEDREAM_PRO_GENERATE_MODEL: "bytedance/seedream-v5.0-pro",
+    WAN_27_GENERATE_MODEL: nano_gpt_client.WAN_27_IMAGE_MODEL_ID,
+    WAN_27_PRO_GENERATE_MODEL: nano_gpt_client.WAN_27_IMAGE_PRO_MODEL_ID,
 }
 GENERATE_ASPECT_RATIOS = ["16:9", "4:3", "1:1", "3:4", "9:16"]
+WAN_27_GENERATE_MODELS = {
+    WAN_27_GENERATE_MODEL,
+    WAN_27_PRO_GENERATE_MODEL,
+}
 SEEDREAM_LITE_RATIO_MAP = {
     "16:9": "16:9",
     "4:3": "3:2",
@@ -62,6 +70,20 @@ SEEDREAM_LITE_RESOLUTIONS = {
     "9:16": "1440x2560",
     "3:2": "3072x2048",
     "2:3": "2048x3072",
+}
+WAN_27_RATIO_MAP = {
+    "16:9": "16:9",
+    "4:3": "3:2",
+    "1:1": "1:1",
+    "3:4": "2:3",
+    "9:16": "9:16",
+}
+WAN_27_RESOLUTIONS = {
+    "1:1": "1024*1024",
+    "16:9": "1280*720",
+    "9:16": "720*1280",
+    "3:2": "1536*1024",
+    "2:3": "1024*1536",
 }
 
 JOB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8)
@@ -197,6 +219,9 @@ def run_generate_model(
         if model_name == SEEDREAM_LITE_GENERATE_MODEL:
             output_ratio = SEEDREAM_LITE_RATIO_MAP[aspect_ratio]
             resolution = SEEDREAM_LITE_RESOLUTIONS[output_ratio]
+        elif model_name in WAN_27_GENERATE_MODELS:
+            output_ratio = WAN_27_RATIO_MAP[aspect_ratio]
+            resolution = WAN_27_RESOLUTIONS[output_ratio]
         else:
             resolution = aspect_ratio
         image_urls = nano_gpt_client.generate_images(
