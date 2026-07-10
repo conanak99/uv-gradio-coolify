@@ -170,6 +170,18 @@ class ProviderRoutingTests(unittest.TestCase):
                 "bytedance/seedream-v5.0-pro",
                 "3:4",
             ),
+            (
+                main.SEEDREAM_LITE_GENERATE_MODEL,
+                "4:3",
+                "seedream-v5.0-lite",
+                "3072x2048",
+            ),
+            (
+                main.SEEDREAM_LITE_GENERATE_MODEL,
+                "3:4",
+                "seedream-v5.0-lite",
+                "2048x3072",
+            ),
         ]
 
         for model_name, ratio, model_id, resolution in cases:
@@ -181,19 +193,27 @@ class ProviderRoutingTests(unittest.TestCase):
                     return_value=["https://image.test/generated.png"],
                 ) as generate_images,
             ):
-                result = main.generate_image(
+                result = main.run_generate_model(
                     "A lighthouse",
                     model_name,
                     ratio,
                     2,
                 )
 
+                expected_ratio = {
+                    "4:3": "4:3 → 3:2",
+                    "3:4": (
+                        "3:4 → 2:3"
+                        if model_name == main.SEEDREAM_LITE_GENERATE_MODEL
+                        else "3:4"
+                    ),
+                }.get(ratio, ratio)
                 self.assertEqual(
                     result,
                     [
                         (
                             "https://image.test/generated.png",
-                            f"{model_name} ({ratio})",
+                            f"{model_name} ({expected_ratio})",
                         )
                     ],
                 )
@@ -210,7 +230,7 @@ class ProviderRoutingTests(unittest.TestCase):
             "generate_images",
             return_value=["https://image.test/grok.png"],
         ) as generate_images:
-            result = main.generate_image(
+            result = main.run_generate_model(
                 "A lighthouse",
                 main.GROK_GENERATE_MODEL,
                 "4:3",
@@ -228,16 +248,35 @@ class ProviderRoutingTests(unittest.TestCase):
         )
         generate_images.assert_called_once_with("A lighthouse", "4:3", 1)
 
-    def test_aspect_ratios_update_for_seedream_lite(self):
-        update = main.generation_aspect_ratio_update(
+    def test_generate_image_runs_all_selected_models(self):
+        models = [
+            main.GROK_GENERATE_MODEL,
             main.SEEDREAM_LITE_GENERATE_MODEL,
-            "3:4",
-        )
+            main.SEEDREAM_PRO_GENERATE_MODEL,
+        ]
 
-        self.assertEqual(update["value"], "1:1")
+        def result_for_model(_prompt, model_name, ratio, _count):
+            return [(f"https://image.test/{model_name}.png", f"{model_name} ({ratio})")]
+
+        with patch.object(
+            main,
+            "run_generate_model",
+            side_effect=result_for_model,
+        ) as run_generate_model:
+            results = main.generate_image(
+                "A lighthouse",
+                models,
+                "1:1",
+                2,
+            )
+
+        self.assertEqual(len(results), 3)
         self.assertEqual(
-            update["choices"],
-            ["16:9", "1:1", "9:16", "3:2", "2:3"],
+            {call.args for call in run_generate_model.call_args_list},
+            {
+                ("A lighthouse", model_name, "1:1", 2)
+                for model_name in models
+            },
         )
 
 
@@ -320,7 +359,10 @@ class HistoryTests(unittest.TestCase):
             updates = list(
                 main.generate_image_flow(
                     "A lighthouse",
-                    main.SEEDREAM_LITE_GENERATE_MODEL,
+                    [
+                        main.SEEDREAM_LITE_GENERATE_MODEL,
+                        main.SEEDREAM_PRO_GENERATE_MODEL,
+                    ],
                     "1:1",
                     "1",
                 )
@@ -338,12 +380,19 @@ class HistoryTests(unittest.TestCase):
             main.SEEDREAM_LITE_GENERATE_MODEL,
             history[0]["settings"],
         )
+        self.assertIn(
+            main.SEEDREAM_PRO_GENERATE_MODEL,
+            history[0]["settings"],
+        )
         self.assertEqual(final_update[4], "A lighthouse")
         self.assertIsNone(final_update[5])
         self.assertEqual(final_update[6], outputs)
         generate_image.assert_called_once_with(
             "A lighthouse",
-            main.SEEDREAM_LITE_GENERATE_MODEL,
+            [
+                main.SEEDREAM_LITE_GENERATE_MODEL,
+                main.SEEDREAM_PRO_GENERATE_MODEL,
+            ],
             "1:1",
             1,
         )
@@ -364,7 +413,7 @@ class HistoryTests(unittest.TestCase):
         with patch.object(main, "generate_image", side_effect=delayed_generation):
             flow = main.generate_image_flow(
                 "A lighthouse after disconnect",
-                main.SEEDREAM_PRO_GENERATE_MODEL,
+                [main.SEEDREAM_PRO_GENERATE_MODEL],
                 "1:1",
                 "1",
             )
