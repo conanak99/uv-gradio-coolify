@@ -4,6 +4,7 @@ import hashlib
 from io import BytesIO
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import tempfile
@@ -13,7 +14,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from image_utils import prepare_for_aspect_ratio, resize_if_needed
 
@@ -32,23 +33,102 @@ SEEDREAM_PRO_EDIT_ASPECT_RATIOS = (
     "4:3",
     "3:4",
 )
-MAX_INPUT_BYTES = 10 * 1024 * 1024
+# NanoGPT's endpoint runs behind a Vercel function with a 4.5 MB body limit.
+# Base64 expands binary data by roughly one third, so leave room for JSON.
+MAX_FUNCTION_BODY_BYTES = 4_500_000
+MAX_DATA_URL_IMAGE_BYTES = 3_000_000
+JPEG_MIN_QUALITY = 75
+JPEG_MAX_QUALITY = 95
 OUTPUT_CACHE = tempfile.TemporaryDirectory(prefix="image-studio-nanogpt-")
 OUTPUT_CACHE_PATH = Path(OUTPUT_CACHE.name)
 OUTPUT_CACHE_LOCK = threading.Lock()
 
 
+def _jpeg_compatible_image(image_path: str) -> Image.Image:
+    with Image.open(image_path) as source:
+        oriented = ImageOps.exif_transpose(source)
+        try:
+            has_alpha = oriented.mode in {"RGBA", "LA"} or (
+                oriented.mode == "P" and "transparency" in oriented.info
+            )
+            if not has_alpha:
+                return oriented.convert("RGB")
+
+            rgba = oriented.convert("RGBA")
+            try:
+                flattened = Image.new("RGB", rgba.size, "white")
+                flattened.paste(rgba, mask=rgba.getchannel("A"))
+                return flattened
+            finally:
+                rgba.close()
+        finally:
+            if oriented is not source:
+                oriented.close()
+
+
+def _encode_jpeg(image: Image.Image, quality: int) -> bytes:
+    output = BytesIO()
+    image.save(
+        output,
+        format="JPEG",
+        quality=quality,
+        optimize=True,
+    )
+    return output.getvalue()
+
+
+def _bounded_jpeg_bytes(image_path: str, max_bytes: int) -> bytes:
+    image = _jpeg_compatible_image(image_path)
+    try:
+        for _ in range(8):
+            lowest_quality_bytes = _encode_jpeg(image, JPEG_MIN_QUALITY)
+            if len(lowest_quality_bytes) <= max_bytes:
+                best_bytes = lowest_quality_bytes
+                low = JPEG_MIN_QUALITY + 1
+                high = JPEG_MAX_QUALITY
+                while low <= high:
+                    quality = (low + high) // 2
+                    candidate = _encode_jpeg(image, quality)
+                    if len(candidate) <= max_bytes:
+                        best_bytes = candidate
+                        low = quality + 1
+                    else:
+                        high = quality - 1
+                return best_bytes
+
+            scale = min(
+                0.9,
+                math.sqrt(max_bytes / len(lowest_quality_bytes)) * 0.95,
+            )
+            new_size = (
+                max(64, int(image.width * scale)),
+                max(64, int(image.height * scale)),
+            )
+            if new_size == image.size:
+                break
+            resized = image.resize(new_size, Image.LANCZOS)
+            image.close()
+            image = resized
+    finally:
+        image.close()
+
+    raise RuntimeError("Could not compress NanoGPT input below the request limit.")
+
+
 def image_to_data_url(image_path: str) -> str:
     image_path = resize_if_needed(image_path)
-    with Image.open(image_path) as image:
-        mime_type = Image.MIME.get(image.format or "", "image/png")
-    with open(image_path, "rb") as image_file:
-        image_bytes = image_file.read()
-    if len(image_bytes) > MAX_INPUT_BYTES:
-        raise RuntimeError("NanoGPT input image must be 10 MB or smaller after resizing.")
+    image_bytes = _bounded_jpeg_bytes(
+        image_path,
+        MAX_DATA_URL_IMAGE_BYTES,
+    )
+    logger.info(
+        "input converted format=jpeg source_bytes=%d converted_bytes=%d",
+        os.path.getsize(image_path),
+        len(image_bytes),
+    )
 
     encoded = base64.b64encode(image_bytes).decode("ascii")
-    return f"data:{mime_type};base64,{encoded}"
+    return f"data:image/jpeg;base64,{encoded}"
 
 
 def _api_key() -> str:
