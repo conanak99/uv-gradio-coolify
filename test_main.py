@@ -119,7 +119,9 @@ class NanoGptTests(unittest.TestCase):
         )
 
     def test_run_nano_gpt_model_uses_env_key_and_edit_model(self):
-        response = io.BytesIO(json.dumps({"data": [{"url": "https://image.test/out.png"}]}).encode())
+        response = io.BytesIO(
+            json.dumps({"data": [{"url": "https://image.test/out.png"}]}).encode()
+        )
 
         with self.assertLogs("clients.nano_gpt", level="INFO") as captured_logs:
             with (
@@ -167,6 +169,39 @@ class NanoGptTests(unittest.TestCase):
         self.assertNotIn("test-key", logs)
         self.assertNotIn("aW1hZ2U=", logs)
         self.assertNotIn("Improve the lighting", logs)
+
+    def test_wan_edit_model_uses_json_edit_without_seedream_size(self):
+        response = io.BytesIO(
+            json.dumps({"data": [{"url": "https://image.test/wan.png"}]}).encode()
+        )
+
+        with (
+            patch.dict(os.environ, {"NANO_GPT_KEY": "test-key"}),
+            patch.object(
+                nano_gpt_api,
+                "image_to_data_url",
+                return_value="data:image/jpeg;base64,aW1hZ2U=",
+            ) as image_to_data_url,
+            patch.object(nano_gpt_api, "prepare_for_aspect_ratio") as prepare,
+            patch.object(nano_gpt_api, "urlopen", return_value=response) as urlopen,
+        ):
+            result = nano_gpt_api.edit_image(
+                nano_gpt_api.WAN_26_EDIT_MODEL_ID,
+                "/tmp/input.png",
+                "Change the jacket color",
+            )
+
+        self.assertEqual(result, "https://image.test/wan.png")
+        payload = json.loads(urlopen.call_args.args[0].data)
+        self.assertEqual(payload["model"], nano_gpt_api.WAN_26_EDIT_MODEL_ID)
+        self.assertEqual(payload["n"], 1)
+        self.assertEqual(
+            payload["imageDataUrl"], "data:image/jpeg;base64,aW1hZ2U="
+        )
+        self.assertNotIn("size", payload)
+        self.assertNotIn("resolution", payload)
+        prepare.assert_not_called()
+        image_to_data_url.assert_called_once_with("/tmp/input.png")
 
     def test_run_nano_gpt_model_requires_key(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -281,30 +316,45 @@ class ProviderRoutingTests(unittest.TestCase):
                 "Generating... 1m 05s",
             )
 
-    def test_seedream_routes_to_nano_gpt_client(self):
-        with patch.object(
-            workflows.nano_gpt_client,
-            "edit_image",
-            return_value="https://image.test/nano.png",
-        ) as edit_image:
-            result = workflows.run_model(
-                "Seedream 5.0 Pro Edit (NanoGPT)",
-                "/tmp/input.png",
-                "Improve the lighting",
-            )
-
-        self.assertEqual(
-            result,
+    def test_nano_gpt_edit_models_route_to_nano_gpt_client(self):
+        cases = [
             (
-                "https://image.test/nano.png",
-                "Seedream 5.0 Pro Edit (NanoGPT)",
+                workflows.SEEDREAM_PRO_EDIT_MODEL,
+                nano_gpt_api.SEEDREAM_PRO_EDIT_MODEL_ID,
             ),
-        )
-        edit_image.assert_called_once_with(
-            "bytedance/seedream-v5.0-pro/edit",
-            "/tmp/input.png",
-            "Improve the lighting",
-        )
+            (
+                workflows.WAN_26_EDIT_MODEL,
+                nano_gpt_api.WAN_26_EDIT_MODEL_ID,
+            ),
+        ]
+
+        for model_name, model_id in cases:
+            with (
+                self.subTest(model=model_name),
+                patch.object(
+                    workflows.nano_gpt_client,
+                    "edit_image",
+                    return_value="https://image.test/nano.png",
+                ) as edit_image,
+            ):
+                result = workflows.run_model(
+                    model_name,
+                    "/tmp/input.png",
+                    "Improve the lighting",
+                )
+
+                self.assertEqual(
+                    result,
+                    (
+                        "https://image.test/nano.png",
+                        model_name,
+                    ),
+                )
+                edit_image.assert_called_once_with(
+                    model_id,
+                    "/tmp/input.png",
+                    "Improve the lighting",
+                )
 
     def test_seedream_generate_models_route_to_nano_gpt(self):
         cases = [

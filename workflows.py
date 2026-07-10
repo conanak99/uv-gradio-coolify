@@ -22,6 +22,9 @@ from image_utils import download_image_url
 
 logger = logging.getLogger(__name__)
 
+SEEDREAM_PRO_EDIT_MODEL = "Seedream 5.0 Pro Edit (NanoGPT)"
+WAN_26_EDIT_MODEL = "WAN 2.6 Image Edit (NanoGPT)"
+
 type ImageReference = str
 type ModelName = str
 type ProgressCallback = Callable[[list[GalleryItem]], None]
@@ -32,11 +35,10 @@ MODEL_MAP: dict[ModelName, str] = {
     "Qwen Image Edit": "fal-ai/qwen-image-edit-2511",
     "FLUX.2 Klein 9B Edit": "fal-ai/flux-2/klein/9b/edit",
     "Grok Imagine Image Edit": "xai/grok-imagine-image/edit",
-    "Seedream 5.0 Pro Edit (NanoGPT)": (
-        nano_gpt_client.SEEDREAM_PRO_EDIT_MODEL_ID
-    ),
+    SEEDREAM_PRO_EDIT_MODEL: nano_gpt_client.SEEDREAM_PRO_EDIT_MODEL_ID,
+    WAN_26_EDIT_MODEL: nano_gpt_client.WAN_26_EDIT_MODEL_ID,
 }
-NANO_GPT_MODELS = {"Seedream 5.0 Pro Edit (NanoGPT)"}
+NANO_GPT_MODELS = {SEEDREAM_PRO_EDIT_MODEL, WAN_26_EDIT_MODEL}
 
 GROK_GENERATE_MODEL = "Grok Imagine (fal.ai)"
 SEEDREAM_LITE_GENERATE_MODEL = "Seedream 5.0 Lite (NanoGPT)"
