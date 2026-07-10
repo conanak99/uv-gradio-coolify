@@ -8,6 +8,8 @@ from unittest.mock import patch
 
 from PIL import Image
 
+from clients import fal as fal_api
+from clients import nano_gpt as nano_gpt_api
 import main
 
 
@@ -17,7 +19,7 @@ class NanoGptTests(unittest.TestCase):
             Image.new("RGB", (10, 10), "red").save(image_file, format="JPEG")
             image_file.flush()
 
-            data_url = main.image_to_data_url(image_file.name)
+            data_url = nano_gpt_api.image_to_data_url(image_file.name)
 
         prefix, encoded = data_url.split(",", 1)
         self.assertEqual(prefix, "data:image/jpeg;base64")
@@ -28,18 +30,18 @@ class NanoGptTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {"NANO_GPT_KEY": "test-key"}),
-            patch.object(main, "urlopen", return_value=response) as urlopen,
+            patch.object(
+                nano_gpt_api, "image_to_data_url", return_value="data:image/png;base64,aW1hZ2U="
+            ),
+            patch.object(nano_gpt_api, "urlopen", return_value=response) as urlopen,
         ):
-            result = main.run_nano_gpt_model(
-                "Seedream 5.0 Pro Edit (NanoGPT)",
-                "data:image/png;base64,aW1hZ2U=",
+            result = nano_gpt_api.edit_image(
+                "bytedance/seedream-v5.0-pro/edit",
+                "/tmp/input.png",
                 "Improve the lighting",
             )
 
-        self.assertEqual(
-            result,
-            ("https://image.test/out.png", "Seedream 5.0 Pro Edit (NanoGPT)"),
-        )
+        self.assertEqual(result, "https://image.test/out.png")
         request = urlopen.call_args.args[0]
         self.assertEqual(request.headers["Authorization"], "Bearer test-key")
         payload = json.loads(request.data)
@@ -52,11 +54,64 @@ class NanoGptTests(unittest.TestCase):
     def test_run_nano_gpt_model_requires_key(self):
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(RuntimeError, "NANO_GPT_KEY"):
-                main.run_nano_gpt_model(
-                    "Seedream 5.0 Pro Edit (NanoGPT)",
-                    "data:image/png;base64,aW1hZ2U=",
+                nano_gpt_api.edit_image(
+                    "bytedance/seedream-v5.0-pro/edit",
+                    "/tmp/input.png",
                     "Improve the lighting",
                 )
+
+
+class FalClientTests(unittest.TestCase):
+    def test_edit_image_builds_fal_request(self):
+        with patch.object(
+            fal_api.fal_client,
+            "subscribe",
+            return_value={"images": [{"url": "https://image.test/fal.png"}]},
+        ) as subscribe:
+            result = fal_api.edit_image(
+                "fal-ai/qwen-image-edit-2511",
+                "https://image.test/input.png",
+                "Improve the lighting",
+            )
+
+        self.assertEqual(result, "https://image.test/fal.png")
+        subscribe.assert_called_once_with(
+            "fal-ai/qwen-image-edit-2511",
+            arguments={
+                "prompt": "Improve the lighting",
+                "image_urls": ["https://image.test/input.png"],
+                "sync_mode": False,
+                "num_images": 1,
+                "enable_safety_checker": False,
+            },
+        )
+
+
+class ProviderRoutingTests(unittest.TestCase):
+    def test_seedream_routes_to_nano_gpt_client(self):
+        with patch.object(
+            main.nano_gpt_client,
+            "edit_image",
+            return_value="https://image.test/nano.png",
+        ) as edit_image:
+            result = main.run_model(
+                "Seedream 5.0 Pro Edit (NanoGPT)",
+                "/tmp/input.png",
+                "Improve the lighting",
+            )
+
+        self.assertEqual(
+            result,
+            (
+                "https://image.test/nano.png",
+                "Seedream 5.0 Pro Edit (NanoGPT)",
+            ),
+        )
+        edit_image.assert_called_once_with(
+            "bytedance/seedream-v5.0-pro/edit",
+            "/tmp/input.png",
+            "Improve the lighting",
+        )
 
 
 class HistoryTests(unittest.TestCase):

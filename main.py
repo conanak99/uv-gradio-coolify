@@ -1,20 +1,17 @@
-import base64
 import concurrent.futures
-import json
 import os
 import time
 from typing import Any, TypedDict
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
+from clients import fal as fal_client
+from clients import nano_gpt as nano_gpt_client
 from dotenv import load_dotenv
-import fal_client
 import gradio as gr
-from PIL import Image
 
 load_dotenv()
 
 type ImageUrl = str
+type ImageReference = str
 type ModelName = str
 type GalleryItem = tuple[ImageUrl, ModelName]
 type History = list["HistoryEntry"]
@@ -37,129 +34,18 @@ MODEL_MAP: dict[ModelName, str] = {
 }
 
 NANO_GPT_MODELS = {"Seedream 5.0 Pro Edit (NanoGPT)"}
-NANO_GPT_IMAGES_URL = "https://nano-gpt.com/api/v1/images"
-NANO_GPT_MAX_INPUT_BYTES = 10 * 1024 * 1024
 MAX_HISTORY_ITEMS = 10
 
-MAX_DIMENSION = 2048
-
-
-def resize_if_needed(image_path: str) -> str:
-    with Image.open(image_path) as image:
-        w, h = image.size
-        if w <= MAX_DIMENSION and h <= MAX_DIMENSION:
-            return image_path
-        scale = MAX_DIMENSION / max(w, h)
-        new_size = (int(w * scale), int(h * scale))
-        resized_image = image.resize(new_size, Image.LANCZOS)
-
-    resized_path = image_path + "_resized.png"
-    try:
-        resized_image.save(resized_path)
-    finally:
-        resized_image.close()
-    return resized_path
-
-
-def upload_image_to_fal(image_path: str) -> ImageUrl:
-    image_path = resize_if_needed(image_path)
-    return fal_client.upload_file(image_path)
-
-
-def image_to_data_url(image_path: str) -> ImageUrl:
-    image_path = resize_if_needed(image_path)
-    with Image.open(image_path) as image:
-        mime_type = Image.MIME.get(image.format or "", "image/png")
-    with open(image_path, "rb") as image_file:
-        image_bytes = image_file.read()
-    if len(image_bytes) > NANO_GPT_MAX_INPUT_BYTES:
-        raise RuntimeError("NanoGPT input image must be 10 MB or smaller after resizing.")
-
-    encoded = base64.b64encode(image_bytes).decode("ascii")
-    return f"data:{mime_type};base64,{encoded}"
-
-
-def run_nano_gpt_model(
-    model_name: ModelName, image_url: ImageUrl, prompt: str
-) -> GalleryItem | None:
-    api_key = os.environ.get("NANO_GPT_KEY")
-    if not api_key:
-        raise RuntimeError("NANO_GPT_KEY is not configured.")
-
-    payload = {
-        "model": MODEL_MAP[model_name],
-        "prompt": prompt,
-        "input_references": [image_url],
-        "n": 1,
-    }
-    request = Request(
-        NANO_GPT_IMAGES_URL,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-
-    try:
-        with urlopen(request, timeout=180) as response:
-            result: dict[str, Any] = json.load(response)
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"NanoGPT request failed ({exc.code}): {detail}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"NanoGPT request failed: {exc.reason}") from exc
-
-    images: list[dict[str, Any]] = result.get("data", [])
-    if not images:
-        return None
-    if image_url := images[0].get("url"):
-        return (image_url, model_name)
-    if image_base64 := images[0].get("b64_json"):
-        return (f"data:image/png;base64,{image_base64}", model_name)
-    return None
-
-
-def poll_result(request_id: str, model_id: str) -> dict[str, Any]:
-    while True:
-        status = fal_client.queue.status(model_id, request_id, with_logs=False)
-        if status["status"] == "COMPLETED":
-            return fal_client.queue.result(model_id, request_id)
-        if status["status"] == "FAILED":
-            raise RuntimeError(f"Request failed: {status}")
-        time.sleep(1)
-
-
-def build_arguments(model_id: str, image_url: ImageUrl, prompt: str) -> dict[str, Any]:
-    args: dict[str, Any] = {
-        "prompt": prompt,
-        "image_urls": [image_url],
-        "sync_mode": False,
-        "num_images": 1,
-    }
-    # Grok Imagine doesn't accept `enable_safety_checker`; only add it for
-    # models that do support it.
-    if not model_id.startswith("xai/"):
-        args["enable_safety_checker"] = False
-    return args
-
-
 def run_model(
-    model_name: ModelName, image_url: ImageUrl, prompt: str
+    model_name: ModelName, image_reference: ImageReference, prompt: str
 ) -> GalleryItem | None:
-    if model_name in NANO_GPT_MODELS:
-        return run_nano_gpt_model(model_name, image_url, prompt)
-
     model_id = MODEL_MAP[model_name]
-    result: dict[str, Any] = fal_client.subscribe(
-        model_id,
-        arguments=build_arguments(model_id, image_url, prompt),
-    )
-    images: list[dict[str, Any]] = result.get("images", [])
-    if images:
-        return (images[0]["url"], model_name)
-    return None
+    if model_name in NANO_GPT_MODELS:
+        image_url = nano_gpt_client.edit_image(model_id, image_reference, prompt)
+    else:
+        image_url = fal_client.edit_image(model_id, image_reference, prompt)
+
+    return (image_url, model_name) if image_url else None
 
 
 def edit_image(
@@ -170,23 +56,22 @@ def edit_image(
     if not models:
         raise gr.Error("Please select at least one model.")
 
-    image_urls: dict[ModelName, ImageUrl] = {}
+    image_references: dict[ModelName, ImageReference] = {}
     if any(model not in NANO_GPT_MODELS for model in models):
-        fal_image_url = upload_image_to_fal(image_path)
-        image_urls.update(
+        fal_image_url = fal_client.upload_image(image_path)
+        image_references.update(
             (model, fal_image_url)
             for model in models
             if model not in NANO_GPT_MODELS
         )
     if any(model in NANO_GPT_MODELS for model in models):
-        nano_gpt_image_url = image_to_data_url(image_path)
-        image_urls.update(
-            (model, nano_gpt_image_url) for model in models if model in NANO_GPT_MODELS
+        image_references.update(
+            (model, image_path) for model in models if model in NANO_GPT_MODELS
         )
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures: dict[concurrent.futures.Future[GalleryItem | None], ModelName] = {
-            executor.submit(run_model, name, image_urls[name], prompt): name
+            executor.submit(run_model, name, image_references[name], prompt): name
             for name in models
         }
         results: list[GalleryItem] = []
@@ -334,21 +219,10 @@ def generate_image(prompt: str, aspect_ratio: str, num_images: int) -> list[Gall
     if not prompt:
         raise gr.Error("Please provide a prompt.")
 
-    result: dict[str, Any] = fal_client.subscribe(
-        "xai/grok-imagine-image",
-        arguments={
-            "prompt": prompt,
-            "num_images": num_images,
-            "aspect_ratio": aspect_ratio,
-            "resolution": "1k",
-            "output_format": "jpeg",
-            "sync_mode": False,
-        },
-    )
-    images: list[dict[str, Any]] = result.get("images", [])
-    if not images:
+    image_urls = fal_client.generate_images(prompt, aspect_ratio, num_images)
+    if not image_urls:
         raise gr.Error("No images returned from the model.")
-    return [(img["url"], f"Grok Imagine ({aspect_ratio})") for img in images]
+    return [(url, f"Grok Imagine ({aspect_ratio})") for url in image_urls]
 
 
 def generate_image_flow(

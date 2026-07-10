@@ -59,8 +59,13 @@ CMD ["uv", "run", "python", "main.py"]
 
 ```
 .
-├── main.py           # Gradio app entrypoint
-├── pyproject.toml    # Project + dependencies (managed by uv)
+├── clients/
+│   ├── fal.py        # fal.ai API client
+│   └── nano_gpt.py   # NanoGPT API client
+├── image_utils.py    # Shared image preparation
+├── main.py           # Gradio UI and orchestration
+├── pyproject.toml    # Project dependencies (managed by uv)
+├── test_main.py      # Unit tests
 ├── uv.lock           # Locked dependency versions
 └── README.md
 ```
