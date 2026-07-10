@@ -141,6 +141,27 @@ def run_generate_model(
 # --- Parallel fan-out ------------------------------------------------------
 
 
+def format_duration(duration_ms: int) -> str:
+    seconds = duration_ms / 1000
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, remaining_seconds = divmod(round(seconds), 60)
+    return f"{minutes}m {remaining_seconds:02d}s"
+
+
+def run_timed_task(
+    task: Callable[[], list[GalleryItem]],
+) -> list[GalleryItem]:
+    """Run one model task, appending its elapsed time to each output caption."""
+    started_at = time.monotonic()
+    task_results = task()
+    duration = format_duration(elapsed_ms(started_at))
+    return [
+        (image_url, f"{caption} · {duration}")
+        for image_url, caption in task_results
+    ]
+
+
 def run_models_in_parallel(
     operation: str,
     tasks: dict[ModelName, Callable[[], list[GalleryItem]]],
@@ -151,7 +172,8 @@ def run_models_in_parallel(
     errors: list[str] = []
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = {
-            executor.submit(task): model_name for model_name, task in tasks.items()
+            executor.submit(run_timed_task, task): model_name
+            for model_name, task in tasks.items()
         }
         for future in concurrent.futures.as_completed(futures):
             model_name = futures[future]
@@ -259,19 +281,17 @@ def record_job(
             type(exc).__name__,
         )
         raise
-    duration_ms = elapsed_ms(started_at)
     entry_id = add_history_entry(
         operation=operation,
         prompt=prompt,
         input_image=input_image,
         outputs=results,
         settings=settings,
-        duration_ms=duration_ms,
     )
     logger.info(
         "job response operation=%s status=success duration_ms=%d images=%d history_id=%s",
         operation.lower(),
-        duration_ms,
+        elapsed_ms(started_at),
         len(results),
         entry_id,
     )
