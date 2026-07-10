@@ -23,7 +23,7 @@ PROMPT_CSS = """
 """
 
 
-with gr.Blocks(title="Image Studio", css=PROMPT_CSS) as demo:
+with gr.Blocks(title="Image Studio") as demo:
     gr.Markdown("# Image Studio")
 
     with gr.Tabs():
@@ -166,4 +166,8 @@ with gr.Blocks(title="Image Studio", css=PROMPT_CSS) as demo:
 if __name__ == "__main__":
     port_env = os.environ.get("PORT")
     port = int(port_env) if port_env else None
-    demo.launch(server_name="0.0.0.0", server_port=port)
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=port,
+        css=PROMPT_CSS,
+    )

@@ -584,7 +584,7 @@ class UiConfigTests(unittest.TestCase):
         ]
 
         self.assertEqual(len(prompt_inputs), 2)
-        self.assertIn("font-size: 16px", config["css"])
+        self.assertIn("font-size: 16px", main.PROMPT_CSS)
 
 
 if __name__ == "__main__":
