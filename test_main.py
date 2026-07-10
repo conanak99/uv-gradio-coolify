@@ -79,13 +79,24 @@ class NanoGptTests(unittest.TestCase):
                     "Improve the lighting",
                 )
 
+    def test_invalid_base64_image_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "invalid base64"):
+            nano_gpt_api._cache_base64_image("not-valid-base64")
+
     def test_generate_images_sends_resolution_and_count(self):
+        generated_image = io.BytesIO()
+        Image.new("RGB", (8, 8), "blue").save(generated_image, format="PNG")
+        generated_bytes = generated_image.getvalue()
         response = io.BytesIO(
             json.dumps(
                 {
                     "data": [
                         {"url": "https://image.test/one.png"},
-                        {"b64_json": "dHdv"},
+                        {
+                            "b64_json": base64.b64encode(
+                                generated_bytes
+                            ).decode()
+                        },
                     ]
                 }
             ).encode()
@@ -103,12 +114,12 @@ class NanoGptTests(unittest.TestCase):
             )
 
         self.assertEqual(
-            results,
-            [
-                "https://image.test/one.png",
-                "data:image/png;base64,dHdv",
-            ],
+            results[0],
+            "https://image.test/one.png",
         )
+        self.assertTrue(results[1].endswith(".png"))
+        with open(results[1], "rb") as generated_file:
+            self.assertEqual(generated_file.read(), generated_bytes)
         payload = json.loads(urlopen.call_args.args[0].data)
         self.assertEqual(
             urlopen.call_args.args[0].full_url,
@@ -643,6 +654,7 @@ class UiConfigTests(unittest.TestCase):
 
         self.assertEqual(len(prompt_inputs), 2)
         self.assertEqual(len(history_selects), 1)
+        self.assertTrue(history_selects[0]["props"]["allow_custom_value"])
         self.assertIn("font-size: 16px", main.PROMPT_CSS)
         self.assertIn(".history-select input", main.PROMPT_CSS)
 

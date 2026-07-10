@@ -110,6 +110,7 @@ with gr.Blocks(title="Image Studio") as demo:
                     label="Latest 10 requests",
                     interactive=True,
                     elem_classes=["history-select"],
+                    allow_custom_value=True,
                 )
                 history_refresh = gr.Button("Refresh")
 

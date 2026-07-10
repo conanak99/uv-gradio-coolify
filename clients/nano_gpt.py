@@ -1,7 +1,13 @@
 import base64
+import binascii
+import hashlib
+from io import BytesIO
 import json
 import logging
 import os
+from pathlib import Path
+import tempfile
+import threading
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -17,6 +23,9 @@ logger = logging.getLogger(__name__)
 IMAGES_URL = "https://nano-gpt.com/api/v1/images"
 IMAGE_EDITS_URL = "https://nano-gpt.com/api/v1/images/edits"
 MAX_INPUT_BYTES = 10 * 1024 * 1024
+OUTPUT_CACHE = tempfile.TemporaryDirectory(prefix="image-studio-nanogpt-")
+OUTPUT_CACHE_PATH = Path(OUTPUT_CACHE.name)
+OUTPUT_CACHE_LOCK = threading.Lock()
 
 
 def image_to_data_url(image_path: str) -> str:
@@ -48,6 +57,32 @@ def _error_message(detail: str) -> str:
     if isinstance(error, dict):
         error = error.get("message") or error.get("code") or "unknown_error"
     return str(error)[:500]
+
+
+def _cache_base64_image(image_base64: str) -> str:
+    try:
+        image_bytes = base64.b64decode(image_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise RuntimeError("NanoGPT returned invalid base64 image data.") from exc
+
+    try:
+        with Image.open(BytesIO(image_bytes)) as image:
+            image_format = image.format
+            image.verify()
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("NanoGPT returned invalid image data.") from exc
+
+    suffix = {
+        "JPEG": ".jpg",
+        "PNG": ".png",
+        "WEBP": ".webp",
+    }.get(image_format or "", ".img")
+    digest = hashlib.sha256(image_bytes).hexdigest()
+    image_path = OUTPUT_CACHE_PATH / f"{digest}{suffix}"
+    with OUTPUT_CACHE_LOCK:
+        if not image_path.exists():
+            image_path.write_bytes(image_bytes)
+    return str(image_path)
 
 
 def _request_images(
@@ -111,7 +146,7 @@ def _request_images(
         if image_url := image.get("url"):
             image_urls.append(image_url)
         elif image_base64 := image.get("b64_json"):
-            image_urls.append(f"data:image/png;base64,{image_base64}")
+            image_urls.append(_cache_base64_image(image_base64))
     logger.info(
         "response endpoint=%s model=%s status=%s duration_ms=%d images=%d",
         endpoint,
