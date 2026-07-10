@@ -6,7 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from PIL import Image
 
@@ -263,20 +263,54 @@ class ProviderRoutingTests(unittest.TestCase):
             "run_generate_model",
             side_effect=result_for_model,
         ) as run_generate_model:
+            progress_updates = []
             results = main.generate_image(
                 "A lighthouse",
                 models,
                 "1:1",
                 2,
+                progress_updates.append,
             )
 
         self.assertEqual(len(results), 3)
+        self.assertEqual(
+            [len(update) for update in progress_updates],
+            [1, 2, 3],
+        )
         self.assertEqual(
             {call.args for call in run_generate_model.call_args_list},
             {
                 ("A lighthouse", model_name, "1:1", 2)
                 for model_name in models
             },
+        )
+
+    def test_edit_image_reports_each_completed_model(self):
+        models = ["Qwen Image Edit", "FLUX.2 Klein 9B Edit"]
+
+        def edit_result(model_name, _image_reference, _prompt):
+            return (f"https://image.test/{model_name}.png", model_name)
+
+        with (
+            patch.object(
+                main.fal_client,
+                "upload_image",
+                return_value="https://image.test/input.png",
+            ),
+            patch.object(main, "run_model", side_effect=edit_result),
+        ):
+            progress_updates = []
+            results = main.edit_image(
+                "/tmp/input.png",
+                "Improve the lighting",
+                models,
+                progress_updates.append,
+            )
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(
+            [len(update) for update in progress_updates],
+            [1, 2],
         )
 
 
@@ -395,7 +429,92 @@ class HistoryTests(unittest.TestCase):
             ],
             "1:1",
             1,
+            ANY,
         )
+
+    def test_generate_flow_streams_before_storing_complete_history(self):
+        first_result = [("https://image.test/first.png", "First Model")]
+        all_results = [
+            *first_result,
+            ("https://image.test/second.png", "Second Model"),
+        ]
+        release_second_result = threading.Event()
+
+        def staged_generation(
+            _prompt, _models, _ratio, _count, progress_callback
+        ):
+            progress_callback(first_result)
+            release_second_result.wait(timeout=2)
+            progress_callback(all_results)
+            return all_results
+
+        with patch.object(
+            main,
+            "generate_image",
+            side_effect=staged_generation,
+        ):
+            flow = main.generate_image_flow(
+                "Stream a lighthouse",
+                [
+                    main.GROK_GENERATE_MODEL,
+                    main.SEEDREAM_PRO_GENERATE_MODEL,
+                ],
+                "1:1",
+                "1",
+            )
+            next(flow)
+            partial_update = next(flow)
+
+            self.assertEqual(partial_update[0], first_result)
+            running_history = main.get_history()[0]
+            self.assertEqual(running_history["status"], "Running")
+            self.assertEqual(running_history["outputs"], [])
+
+            release_second_result.set()
+            remaining_updates = list(flow)
+
+        self.assertEqual(remaining_updates[0][0], all_results)
+        self.assertEqual(remaining_updates[-1][0], all_results)
+        completed_history = main.get_history()[0]
+        self.assertEqual(completed_history["status"], "Completed")
+        self.assertEqual(completed_history["outputs"], all_results)
+
+    def test_edit_flow_streams_before_storing_complete_history(self):
+        first_result = [("https://image.test/edit-first.png", "First Edit")]
+        all_results = [
+            *first_result,
+            ("https://image.test/edit-second.png", "Second Edit"),
+        ]
+        release_second_result = threading.Event()
+
+        def staged_edit(_path, _prompt, _models, progress_callback):
+            progress_callback(first_result)
+            release_second_result.wait(timeout=2)
+            progress_callback(all_results)
+            return all_results
+
+        with patch.object(main, "edit_image", side_effect=staged_edit):
+            flow = main.edit_image_flow(
+                "/tmp/input.png",
+                "Stream an edit",
+                ["First Edit", "Second Edit"],
+            )
+            next(flow)
+            partial_update = next(flow)
+
+            self.assertEqual(partial_update[0], first_result)
+            running_history = main.get_history()[0]
+            self.assertEqual(running_history["status"], "Running")
+            self.assertEqual(running_history["outputs"], [])
+
+            release_second_result.set()
+            remaining_updates = list(flow)
+
+        self.assertEqual(remaining_updates[0][0], all_results)
+        self.assertEqual(remaining_updates[-1][0], all_results)
+        completed_history = main.get_history()[0]
+        self.assertEqual(completed_history["status"], "Completed")
+        self.assertEqual(completed_history["outputs"], all_results)
 
     def test_generation_completes_in_memory_after_client_disconnect(self):
         release_generation = threading.Event()

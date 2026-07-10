@@ -1,7 +1,9 @@
 import concurrent.futures
 import os
+import queue
 import threading
 import time
+from collections.abc import Callable, Iterator
 from typing import Any, TypedDict
 import uuid
 
@@ -17,6 +19,7 @@ type ImageReference = str
 type ModelName = str
 type GalleryItem = tuple[ImageUrl, ModelName]
 type History = list["HistoryEntry"]
+type ProgressCallback = Callable[[list[GalleryItem]], None]
 
 
 class HistoryEntry(TypedDict):
@@ -81,7 +84,10 @@ def run_model(
 
 
 def edit_image(
-    image_path: str, prompt: str, models: list[ModelName]
+    image_path: str,
+    prompt: str,
+    models: list[ModelName],
+    progress_callback: ProgressCallback | None = None,
 ) -> list[GalleryItem]:
     if not image_path or not prompt:
         raise gr.Error("Please provide both an image and a prompt.")
@@ -118,6 +124,8 @@ def edit_image(
                 continue
             if result:
                 results.append(result)
+                if progress_callback:
+                    progress_callback(list(results))
 
     if not results:
         detail = "; ".join(errors) if errors else "no images returned"
@@ -244,14 +252,31 @@ def refresh_history() -> tuple[Any, str, str, str | None, list[GalleryItem]]:
     return history_view(get_history())
 
 
+def iter_job_progress(
+    future: concurrent.futures.Future[list[GalleryItem]],
+    progress_queue: queue.Queue[list[GalleryItem]],
+) -> Iterator[list[GalleryItem]]:
+    while not future.done() or not progress_queue.empty():
+        try:
+            yield progress_queue.get(timeout=0.1)
+        except queue.Empty:
+            continue
+
+
 def run_edit_job(
     entry_id: str,
     image_path: str,
     prompt: str,
     models: list[ModelName],
+    progress_queue: queue.Queue[list[GalleryItem]],
 ) -> list[GalleryItem]:
     try:
-        results = edit_image(image_path, prompt, models)
+        results = edit_image(
+            image_path,
+            prompt,
+            models,
+            progress_queue.put,
+        )
     except Exception as exc:
         finish_history_entry(entry_id, error=str(exc))
         raise
@@ -270,18 +295,26 @@ def edit_image_flow(
         input_image=image_path,
         settings=f'Models: {", ".join(models)}',
     )
+    progress_queue: queue.Queue[list[GalleryItem]] = queue.Queue()
     future = JOB_EXECUTOR.submit(
         run_edit_job,
         entry_id,
         image_path,
         prompt,
         models,
+        progress_queue,
     )
     yield (
         gr.update(),
         gr.update(interactive=False, value="Editing..."),
         *history_view(get_history(), entry_id),
     )
+    for partial_results in iter_job_progress(future, progress_queue):
+        yield (
+            partial_results,
+            gr.update(interactive=False, value="Editing..."),
+            *history_view(get_history(), entry_id),
+        )
     try:
         results = future.result()
     except BaseException:
@@ -334,6 +367,7 @@ def generate_image(
     models: list[ModelName],
     aspect_ratio: str,
     num_images: int,
+    progress_callback: ProgressCallback | None = None,
 ) -> list[GalleryItem]:
     if not prompt:
         raise gr.Error("Please provide a prompt.")
@@ -363,6 +397,8 @@ def generate_image(
             model_name = futures[future]
             try:
                 results.extend(future.result())
+                if progress_callback:
+                    progress_callback(list(results))
             except Exception as exc:
                 errors.append(f"{model_name}: {exc}")
                 print(f"[generate_image] {model_name} failed: {exc}")
@@ -381,6 +417,7 @@ def run_generate_job(
     models: list[ModelName],
     aspect_ratio: str,
     num_images: int,
+    progress_queue: queue.Queue[list[GalleryItem]],
 ) -> list[GalleryItem]:
     try:
         results = generate_image(
@@ -388,6 +425,7 @@ def run_generate_job(
             models,
             aspect_ratio,
             num_images,
+            progress_queue.put,
         )
     except Exception as exc:
         finish_history_entry(entry_id, error=str(exc))
@@ -411,6 +449,7 @@ def generate_image_flow(
             f"Images: {num_images}"
         ),
     )
+    progress_queue: queue.Queue[list[GalleryItem]] = queue.Queue()
     future = JOB_EXECUTOR.submit(
         run_generate_job,
         entry_id,
@@ -418,12 +457,19 @@ def generate_image_flow(
         models,
         aspect_ratio,
         int(num_images),
+        progress_queue,
     )
     yield (
         gr.update(),
         gr.update(interactive=False, value="Generating..."),
         *history_view(get_history(), entry_id),
     )
+    for partial_results in iter_job_progress(future, progress_queue):
+        yield (
+            partial_results,
+            gr.update(interactive=False, value="Generating..."),
+            *history_view(get_history(), entry_id),
+        )
     try:
         results = future.result()
     except BaseException:
