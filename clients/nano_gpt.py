@@ -1,3 +1,5 @@
+"""NanoGPT client: JSON image edits and generation for any NanoGPT model id."""
+
 import base64
 import binascii
 import hashlib
@@ -16,6 +18,7 @@ from urllib.request import Request, urlopen
 
 from PIL import Image, ImageOps
 
+from clients import elapsed_ms
 from image_utils import prepare_for_aspect_ratio, resize_if_needed
 
 
@@ -23,19 +26,6 @@ logger = logging.getLogger(__name__)
 
 IMAGES_URL = "https://nano-gpt.com/api/v1/images"
 IMAGE_EDITS_URL = "https://nano-gpt.com/api/v1/images/edits"
-SEEDREAM_PRO_EDIT_MODEL_ID = "bytedance/seedream-v5.0-pro/edit"
-WAN_26_EDIT_MODEL_ID = "wan-2.6-image-edit"
-WAN_27_IMAGE_MODEL_ID = "wan2.7-image"
-WAN_27_IMAGE_PRO_MODEL_ID = "wan2.7-image-pro"
-SEEDREAM_PRO_EDIT_ASPECT_RATIOS = (
-    "1:1",
-    "16:9",
-    "9:16",
-    "3:2",
-    "2:3",
-    "4:3",
-    "3:4",
-)
 # NanoGPT's endpoint runs behind a Vercel function with a 4.5 MB body limit.
 # Base64 expands binary data by roughly one third, so leave room for JSON.
 MAX_FUNCTION_BODY_BYTES = 4_500_000
@@ -219,7 +209,7 @@ def _request_images(
             endpoint,
             payload.get("model"),
             exc.code,
-            int((time.monotonic() - started_at) * 1000),
+            elapsed_ms(started_at),
             _error_message(detail),
         )
         raise RuntimeError(f"NanoGPT request failed ({exc.code}): {detail}") from exc
@@ -228,7 +218,7 @@ def _request_images(
             "response endpoint=%s model=%s status=network_error duration_ms=%d error=%s",
             endpoint,
             payload.get("model"),
-            int((time.monotonic() - started_at) * 1000),
+            elapsed_ms(started_at),
             exc.reason,
         )
         raise RuntimeError(f"NanoGPT request failed: {exc.reason}") from exc
@@ -245,27 +235,32 @@ def _request_images(
         endpoint,
         payload.get("model"),
         status,
-        int((time.monotonic() - started_at) * 1000),
+        elapsed_ms(started_at),
         len(image_urls),
     )
     return image_urls
 
 
-def edit_image(model_id: str, image_path: str, prompt: str) -> str | None:
+def edit_image(
+    model_id: str,
+    image_path: str,
+    prompt: str,
+    crop_aspect_ratios: tuple[str, ...] = (),
+) -> str | None:
+    """Edit an image; optionally crop it to the closest supported ratio."""
     api_key = _api_key()
-    prepared_path = image_path
     payload: dict[str, Any] = {
         "model": model_id,
         "prompt": prompt,
         "n": 1,
     }
-    if model_id == SEEDREAM_PRO_EDIT_MODEL_ID:
-        prepared_path, aspect_ratio = prepare_for_aspect_ratio(
+    if crop_aspect_ratios:
+        image_path, aspect_ratio = prepare_for_aspect_ratio(
             image_path,
-            SEEDREAM_PRO_EDIT_ASPECT_RATIOS,
+            crop_aspect_ratios,
         )
         payload["size"] = aspect_ratio
-    payload["imageDataUrl"] = image_to_data_url(prepared_path)
+    payload["imageDataUrl"] = image_to_data_url(image_path)
     image_urls = _request_images(payload, api_key, IMAGE_EDITS_URL)
     return image_urls[0] if image_urls else None
 
