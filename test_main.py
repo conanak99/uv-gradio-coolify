@@ -59,5 +59,46 @@ class NanoGptTests(unittest.TestCase):
                 )
 
 
+class HistoryTests(unittest.TestCase):
+    def test_history_keeps_latest_ten_entries_without_mutating_input(self):
+        history: main.History = []
+
+        for index in range(11):
+            previous_history = history
+            history = main.add_history_entry(
+                history,
+                operation="Generate",
+                prompt=f"Prompt {index}",
+                input_image=None,
+                outputs=[(f"https://image.test/{index}.png", "Model")],
+                settings="Aspect ratio: 1:1 · Images: 1",
+            )
+            self.assertIsNot(history, previous_history)
+
+        self.assertEqual(len(history), 10)
+        self.assertEqual(history[0]["prompt"], "Prompt 10")
+        self.assertEqual(history[-1]["prompt"], "Prompt 1")
+
+    def test_history_entry_view_returns_selected_input_and_outputs(self):
+        outputs = [("https://image.test/edited.png", "Edit Model")]
+        history = main.add_history_entry(
+            [],
+            operation="Edit",
+            prompt="Make it brighter",
+            input_image="/tmp/input.png",
+            outputs=outputs,
+            settings="Models: Edit Model",
+        )
+
+        details, prompt, input_image, selected_outputs = main.history_entry_view(
+            history, history[0]["id"]
+        )
+
+        self.assertIn("Edit", details)
+        self.assertEqual(prompt, "Make it brighter")
+        self.assertEqual(input_image, "/tmp/input.png")
+        self.assertEqual(selected_outputs, outputs)
+
+
 if __name__ == "__main__":
     unittest.main()

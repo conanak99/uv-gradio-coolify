@@ -3,7 +3,7 @@ import concurrent.futures
 import json
 import os
 import time
-from typing import Any
+from typing import Any, TypedDict
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -17,6 +17,17 @@ load_dotenv()
 type ImageUrl = str
 type ModelName = str
 type GalleryItem = tuple[ImageUrl, ModelName]
+type History = list["HistoryEntry"]
+
+
+class HistoryEntry(TypedDict):
+    id: str
+    created_at: str
+    operation: str
+    prompt: str
+    input_image: str | None
+    outputs: list[GalleryItem]
+    settings: str
 
 MODEL_MAP: dict[ModelName, str] = {
     "Qwen Image Edit": "fal-ai/qwen-image-edit-2511",
@@ -28,6 +39,7 @@ MODEL_MAP: dict[ModelName, str] = {
 NANO_GPT_MODELS = {"Seedream 5.0 Pro Edit (NanoGPT)"}
 NANO_GPT_IMAGES_URL = "https://nano-gpt.com/api/v1/images"
 NANO_GPT_MAX_INPUT_BYTES = 10 * 1024 * 1024
+MAX_HISTORY_ITEMS = 10
 
 MAX_DIMENSION = 2048
 
@@ -200,21 +212,122 @@ def edit_image(
     return results
 
 
+def add_history_entry(
+    history: History,
+    *,
+    operation: str,
+    prompt: str,
+    input_image: str | None,
+    outputs: list[GalleryItem],
+    settings: str,
+) -> History:
+    entry: HistoryEntry = {
+        "id": str(time.time_ns()),
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "operation": operation,
+        "prompt": prompt,
+        "input_image": input_image,
+        "outputs": list(outputs),
+        "settings": settings,
+    }
+    return [entry, *history][:MAX_HISTORY_ITEMS]
+
+
+def history_choices(history: History) -> list[tuple[str, str]]:
+    choices: list[tuple[str, str]] = []
+    for entry in history:
+        prompt = " ".join(entry["prompt"].split())
+        if len(prompt) > 60:
+            prompt = f"{prompt[:57]}..."
+        label = f'{entry["created_at"]} · {entry["operation"]} · {prompt}'
+        choices.append((label, entry["id"]))
+    return choices
+
+
+def history_entry_view(
+    history: History, entry_id: str | None
+) -> tuple[str, str, str | None, list[GalleryItem]]:
+    if not history:
+        return "No history yet.", "", None, []
+
+    entry = next(
+        (item for item in history if item["id"] == entry_id),
+        history[0],
+    )
+    details = (
+        f'**{entry["operation"]}** · {entry["created_at"]}\n\n'
+        f'{entry["settings"]}'
+    )
+    return (
+        details,
+        entry["prompt"],
+        entry["input_image"],
+        entry["outputs"],
+    )
+
+
+def history_view(
+    history: History, entry_id: str | None = None
+) -> tuple[Any, str, str, str | None, list[GalleryItem]]:
+    if not history:
+        return gr.update(choices=[], value=None), "No history yet.", "", None, []
+
+    selected_id = entry_id if any(
+        item["id"] == entry_id for item in history
+    ) else history[0]["id"]
+    return (
+        gr.update(choices=history_choices(history), value=selected_id),
+        *history_entry_view(history, selected_id),
+    )
+
+
 def edit_image_flow(
-    image_path: str, prompt: str, models: list[ModelName]
+    image_path: str, prompt: str, models: list[ModelName], history: History
 ):
     # Disable the button while work is in flight; yielding ensures the UI
     # reflects this state before the long-running call starts.
-    yield gr.update(), gr.update(interactive=False, value="Editing...")
+    yield (
+        gr.update(),
+        gr.update(interactive=False, value="Editing..."),
+        history,
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+    )
     try:
         results = edit_image(image_path, prompt, models)
     except BaseException:
         # Re-enable the button on any failure (including gr.Error) so the UI
         # doesn't get stuck in the "Editing..." state, then re-raise to let
         # Gradio surface the error to the user.
-        yield gr.update(), gr.update(interactive=True, value="Edit Image")
+        yield (
+            gr.update(),
+            gr.update(interactive=True, value="Edit Image"),
+            history,
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+        )
         raise
-    yield results, gr.update(interactive=True, value="Edit Image")
+
+    updated_history = add_history_entry(
+        history,
+        operation="Edit",
+        prompt=prompt,
+        input_image=image_path,
+        outputs=results,
+        settings=f'Models: {", ".join(models)}',
+    )
+    yield (
+        results,
+        gr.update(interactive=True, value="Edit Image"),
+        updated_history,
+        *history_view(updated_history),
+    )
 
 
 def generate_image(prompt: str, aspect_ratio: str, num_images: int) -> list[GalleryItem]:
@@ -238,18 +351,53 @@ def generate_image(prompt: str, aspect_ratio: str, num_images: int) -> list[Gall
     return [(img["url"], f"Grok Imagine ({aspect_ratio})") for img in images]
 
 
-def generate_image_flow(prompt: str, aspect_ratio: str, num_images: str):
-    yield gr.update(), gr.update(interactive=False, value="Generating...")
+def generate_image_flow(
+    prompt: str, aspect_ratio: str, num_images: str, history: History
+):
+    yield (
+        gr.update(),
+        gr.update(interactive=False, value="Generating..."),
+        history,
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+    )
     try:
         results = generate_image(prompt, aspect_ratio, int(num_images))
     except BaseException:
-        yield gr.update(), gr.update(interactive=True, value="Generate")
+        yield (
+            gr.update(),
+            gr.update(interactive=True, value="Generate"),
+            history,
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+        )
         raise
-    yield results, gr.update(interactive=True, value="Generate")
+
+    updated_history = add_history_entry(
+        history,
+        operation="Generate",
+        prompt=prompt,
+        input_image=None,
+        outputs=results,
+        settings=f"Aspect ratio: {aspect_ratio} · Images: {num_images}",
+    )
+    yield (
+        results,
+        gr.update(interactive=True, value="Generate"),
+        updated_history,
+        *history_view(updated_history),
+    )
 
 
 with gr.Blocks(title="Image Studio") as demo:
     gr.Markdown("# Image Studio")
+    history_state = gr.State([])
 
     with gr.Tabs():
         with gr.Tab("Edit"):
@@ -271,12 +419,6 @@ with gr.Blocks(title="Image Studio") as demo:
                     edit_gallery = gr.Gallery(
                         label="Edited Images", columns=2, object_fit="contain"
                     )
-
-            edit_btn.click(
-                fn=edit_image_flow,
-                inputs=[input_image, edit_prompt, models],
-                outputs=[edit_gallery, edit_btn],
-            )
 
         with gr.Tab("Generate"):
             with gr.Row():
@@ -302,11 +444,71 @@ with gr.Blocks(title="Image Studio") as demo:
                         label="Generated Images", columns=2, object_fit="contain"
                     )
 
-            gen_btn.click(
-                fn=generate_image_flow,
-                inputs=[gen_prompt, gen_ratio, gen_num],
-                outputs=[gen_gallery, gen_btn],
+        with gr.Tab("History"):
+            with gr.Row():
+                history_selector = gr.Dropdown(
+                    choices=[],
+                    label="Latest 10 requests",
+                    interactive=True,
+                )
+                history_refresh = gr.Button("Refresh")
+
+            history_details = gr.Markdown("No history yet.")
+            history_prompt = gr.Textbox(
+                label="Prompt",
+                interactive=False,
             )
+            with gr.Row():
+                history_input = gr.Image(
+                    label="Input Image",
+                    interactive=False,
+                    height="40vh",
+                )
+                history_gallery = gr.Gallery(
+                    label="Outputs",
+                    columns=2,
+                    object_fit="contain",
+                )
+
+    history_outputs = [
+        history_state,
+        history_selector,
+        history_details,
+        history_prompt,
+        history_input,
+        history_gallery,
+    ]
+    edit_btn.click(
+        fn=edit_image_flow,
+        inputs=[input_image, edit_prompt, models, history_state],
+        outputs=[edit_gallery, edit_btn, *history_outputs],
+    )
+    gen_btn.click(
+        fn=generate_image_flow,
+        inputs=[gen_prompt, gen_ratio, gen_num, history_state],
+        outputs=[gen_gallery, gen_btn, *history_outputs],
+    )
+    history_selector.change(
+        fn=history_entry_view,
+        inputs=[history_state, history_selector],
+        outputs=[
+            history_details,
+            history_prompt,
+            history_input,
+            history_gallery,
+        ],
+    )
+    history_refresh.click(
+        fn=history_view,
+        inputs=[history_state],
+        outputs=[
+            history_selector,
+            history_details,
+            history_prompt,
+            history_input,
+            history_gallery,
+        ],
+    )
 
 
 if __name__ == "__main__":
