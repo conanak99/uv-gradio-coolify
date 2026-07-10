@@ -27,17 +27,14 @@ def image_to_data_url(image_path: str) -> str:
     return f"data:{mime_type};base64,{encoded}"
 
 
-def edit_image(model_id: str, image_path: str, prompt: str) -> str | None:
+def _api_key() -> str:
     api_key = os.environ.get("NANO_GPT_KEY")
     if not api_key:
         raise RuntimeError("NANO_GPT_KEY is not configured.")
+    return api_key
 
-    payload = {
-        "model": model_id,
-        "prompt": prompt,
-        "input_references": [image_to_data_url(image_path)],
-        "n": 1,
-    }
+
+def _request_images(payload: dict[str, Any], api_key: str) -> list[str]:
     request = Request(
         IMAGES_URL,
         data=json.dumps(payload).encode("utf-8"),
@@ -58,10 +55,39 @@ def edit_image(model_id: str, image_path: str, prompt: str) -> str | None:
         raise RuntimeError(f"NanoGPT request failed: {exc.reason}") from exc
 
     images: list[dict[str, Any]] = result.get("data", [])
-    if not images:
-        return None
-    if image_url := images[0].get("url"):
-        return image_url
-    if image_base64 := images[0].get("b64_json"):
-        return f"data:image/png;base64,{image_base64}"
-    return None
+    image_urls: list[str] = []
+    for image in images:
+        if image_url := image.get("url"):
+            image_urls.append(image_url)
+        elif image_base64 := image.get("b64_json"):
+            image_urls.append(f"data:image/png;base64,{image_base64}")
+    return image_urls
+
+
+def edit_image(model_id: str, image_path: str, prompt: str) -> str | None:
+    api_key = _api_key()
+    payload = {
+        "model": model_id,
+        "prompt": prompt,
+        "input_references": [image_to_data_url(image_path)],
+        "n": 1,
+    }
+    image_urls = _request_images(payload, api_key)
+    return image_urls[0] if image_urls else None
+
+
+def generate_images(
+    model_id: str,
+    prompt: str,
+    resolution: str,
+    num_images: int,
+) -> list[str]:
+    return _request_images(
+        {
+            "model": model_id,
+            "prompt": prompt,
+            "resolution": resolution,
+            "n": num_images,
+        },
+        _api_key(),
+    )

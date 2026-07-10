@@ -36,6 +36,44 @@ MODEL_MAP: dict[ModelName, str] = {
 NANO_GPT_MODELS = {"Seedream 5.0 Pro Edit (NanoGPT)"}
 MAX_HISTORY_ITEMS = 10
 
+GROK_GENERATE_MODEL = "Grok Imagine (fal.ai)"
+SEEDREAM_LITE_GENERATE_MODEL = "Seedream 5.0 Lite (NanoGPT)"
+SEEDREAM_PRO_GENERATE_MODEL = "Seedream 5.0 Pro (NanoGPT)"
+GENERATE_MODEL_MAP: dict[ModelName, str] = {
+    GROK_GENERATE_MODEL: fal_client.GROK_GENERATE_MODEL_ID,
+    SEEDREAM_LITE_GENERATE_MODEL: "seedream-v5.0-lite",
+    SEEDREAM_PRO_GENERATE_MODEL: "bytedance/seedream-v5.0-pro",
+}
+GENERATE_ASPECT_RATIOS: dict[ModelName, list[str]] = {
+    GROK_GENERATE_MODEL: ["16:9", "4:3", "1:1", "3:4", "9:16"],
+    SEEDREAM_LITE_GENERATE_MODEL: ["16:9", "1:1", "9:16", "3:2", "2:3"],
+    SEEDREAM_PRO_GENERATE_MODEL: [
+        "16:9",
+        "4:3",
+        "1:1",
+        "3:4",
+        "9:16",
+        "3:2",
+        "2:3",
+    ],
+}
+SEEDREAM_LITE_RESOLUTIONS = {
+    "1:1": "2048x2048",
+    "16:9": "2560x1440",
+    "9:16": "1440x2560",
+    "3:2": "3072x2048",
+    "2:3": "2048x3072",
+}
+
+
+def generation_aspect_ratio_update(
+    model_name: ModelName, current_ratio: str
+) -> Any:
+    choices = GENERATE_ASPECT_RATIOS[model_name]
+    value = current_ratio if current_ratio in choices else "1:1"
+    return gr.update(choices=choices, value=value)
+
+
 def run_model(
     model_name: ModelName, image_reference: ImageReference, prompt: str
 ) -> GalleryItem | None:
@@ -215,18 +253,44 @@ def edit_image_flow(
     )
 
 
-def generate_image(prompt: str, aspect_ratio: str, num_images: int) -> list[GalleryItem]:
+def generate_image(
+    prompt: str,
+    model_name: ModelName,
+    aspect_ratio: str,
+    num_images: int,
+) -> list[GalleryItem]:
     if not prompt:
         raise gr.Error("Please provide a prompt.")
+    if model_name not in GENERATE_MODEL_MAP:
+        raise gr.Error("Please select a valid generation model.")
+    if aspect_ratio not in GENERATE_ASPECT_RATIOS[model_name]:
+        raise gr.Error(f"{model_name} does not support {aspect_ratio}.")
 
-    image_urls = fal_client.generate_images(prompt, aspect_ratio, num_images)
+    if model_name == GROK_GENERATE_MODEL:
+        image_urls = fal_client.generate_images(prompt, aspect_ratio, num_images)
+    else:
+        resolution = (
+            SEEDREAM_LITE_RESOLUTIONS[aspect_ratio]
+            if model_name == SEEDREAM_LITE_GENERATE_MODEL
+            else aspect_ratio
+        )
+        image_urls = nano_gpt_client.generate_images(
+            GENERATE_MODEL_MAP[model_name],
+            prompt,
+            resolution,
+            num_images,
+        )
     if not image_urls:
         raise gr.Error("No images returned from the model.")
-    return [(url, f"Grok Imagine ({aspect_ratio})") for url in image_urls]
+    return [(url, f"{model_name} ({aspect_ratio})") for url in image_urls]
 
 
 def generate_image_flow(
-    prompt: str, aspect_ratio: str, num_images: str, history: History
+    prompt: str,
+    model_name: ModelName,
+    aspect_ratio: str,
+    num_images: str,
+    history: History,
 ):
     yield (
         gr.update(),
@@ -239,7 +303,12 @@ def generate_image_flow(
         gr.update(),
     )
     try:
-        results = generate_image(prompt, aspect_ratio, int(num_images))
+        results = generate_image(
+            prompt,
+            model_name,
+            aspect_ratio,
+            int(num_images),
+        )
     except BaseException:
         yield (
             gr.update(),
@@ -259,7 +328,10 @@ def generate_image_flow(
         prompt=prompt,
         input_image=None,
         outputs=results,
-        settings=f"Aspect ratio: {aspect_ratio} · Images: {num_images}",
+        settings=(
+            f"Model: {model_name} · Aspect ratio: {aspect_ratio} · "
+            f"Images: {num_images}"
+        ),
     )
     yield (
         results,
@@ -301,8 +373,13 @@ with gr.Blocks(title="Image Studio") as demo:
                         label="Prompt",
                         placeholder="Describe the image you want to generate...",
                     )
+                    gen_model = gr.Radio(
+                        choices=list(GENERATE_MODEL_MAP.keys()),
+                        value=GROK_GENERATE_MODEL,
+                        label="Model",
+                    )
                     gen_ratio = gr.Radio(
-                        choices=["16:9", "4:3", "1:1", "3:4", "9:16"],
+                        choices=GENERATE_ASPECT_RATIOS[GROK_GENERATE_MODEL],
                         value="3:4",
                         label="Aspect Ratio",
                     )
@@ -359,8 +436,13 @@ with gr.Blocks(title="Image Studio") as demo:
     )
     gen_btn.click(
         fn=generate_image_flow,
-        inputs=[gen_prompt, gen_ratio, gen_num, history_state],
+        inputs=[gen_prompt, gen_model, gen_ratio, gen_num, history_state],
         outputs=[gen_gallery, gen_btn, *history_outputs],
+    )
+    gen_model.change(
+        fn=generation_aspect_ratio_update,
+        inputs=[gen_model, gen_ratio],
+        outputs=[gen_ratio],
     )
     history_selector.change(
         fn=history_entry_view,

@@ -19,6 +19,7 @@ Then open the URL printed in the terminal (defaults to <http://127.0.0.1:7860>).
 ## Notes
 
 - **Image resizing**: Input images with any dimension larger than 2048px are automatically scaled down (preserving aspect ratio) before being sent to the model, which supports a maximum of 2048×2048.
+- **Generation models**: Generate with Grok Imagine, Seedream 5.0 Lite, or Seedream 5.0 Pro. Aspect-ratio choices update to match the selected model.
 - **History**: Each browser session keeps its latest 10 successful edit and generation requests in memory. History is cleared when the session or app restarts.
 
 ## Configuration
@@ -27,7 +28,7 @@ Then open the URL printed in the terminal (defaults to <http://127.0.0.1:7860>).
 | --- | --- | --- |
 | `PORT` | auto (`7860` if free) | Port the Gradio server binds to. Most PaaS platforms inject this automatically. |
 | `FAL_KEY` | — | fal.ai API key used by the fal.ai edit and generation models. |
-| `NANO_GPT_KEY` | — | NanoGPT API key used by the Seedream 5.0 Pro Edit model. |
+| `NANO_GPT_KEY` | — | NanoGPT API key used by Seedream edit and generation models. |
 
 ## Deploying
 
