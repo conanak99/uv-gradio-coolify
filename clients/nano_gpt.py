@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 IMAGES_URL = "https://nano-gpt.com/api/v1/images"
 IMAGE_EDITS_URL = "https://nano-gpt.com/api/v1/images/edits"
 SEEDREAM_PRO_EDIT_MODEL_ID = "bytedance/seedream-v5.0-pro/edit"
+WAN_26_EDIT_MODEL_ID = "wan-2.6-image-edit"
 SEEDREAM_PRO_EDIT_ASPECT_RATIOS = (
     "1:1",
     "16:9",
