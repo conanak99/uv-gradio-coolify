@@ -99,6 +99,22 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(input_image, "/tmp/input.png")
         self.assertEqual(selected_outputs, outputs)
 
+    def test_generate_flow_adds_successful_request_to_history(self):
+        outputs = [("https://image.test/generated.png", "Grok Imagine (1:1)")]
+
+        with patch.object(main, "generate_image", return_value=outputs):
+            updates = list(main.generate_image_flow("A lighthouse", "1:1", "1", []))
+
+        self.assertEqual(len(updates), 2)
+        final_update = updates[-1]
+        self.assertEqual(len(final_update), 8)
+        self.assertEqual(final_update[0], outputs)
+        self.assertEqual(final_update[2][0]["operation"], "Generate")
+        self.assertEqual(final_update[2][0]["prompt"], "A lighthouse")
+        self.assertEqual(final_update[5], "A lighthouse")
+        self.assertIsNone(final_update[6])
+        self.assertEqual(final_update[7], outputs)
+
 
 if __name__ == "__main__":
     unittest.main()
