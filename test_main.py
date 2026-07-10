@@ -698,6 +698,51 @@ class HistoryTests(unittest.TestCase):
 
 
 class UiConfigTests(unittest.TestCase):
+    def test_model_preferences_restore_only_available_models(self):
+        edit_model = main.DEFAULT_EDIT_MODELS[0]
+        generate_model = main.DEFAULT_GENERATE_MODELS[-1]
+
+        edit_models, generate_models = main.load_model_preferences(
+            [edit_model, "Removed Edit Model"],
+            ["Removed Generate Model", generate_model],
+        )
+
+        self.assertEqual(edit_models, [edit_model])
+        self.assertEqual(generate_models, [generate_model])
+
+    def test_model_preferences_fall_back_to_defaults_for_invalid_state(self):
+        edit_models, generate_models = main.load_model_preferences(
+            None,
+            [{"bad": "state"}],
+        )
+
+        self.assertEqual(edit_models, main.DEFAULT_EDIT_MODELS)
+        self.assertEqual(generate_models, main.DEFAULT_GENERATE_MODELS)
+
+    def test_model_preference_save_ignores_removed_models(self):
+        edit_model = main.DEFAULT_EDIT_MODELS[-1]
+        generate_model = main.DEFAULT_GENERATE_MODELS[0]
+
+        self.assertEqual(
+            main.save_edit_model_preference([edit_model, "Removed Edit Model"]),
+            [edit_model],
+        )
+        self.assertEqual(
+            main.save_generate_model_preference(
+                [generate_model, "Removed Generate Model"]
+            ),
+            [generate_model],
+        )
+
+    def test_edit_prompt_preference_round_trips_text(self):
+        self.assertEqual(
+            main.edit_prompt_preference("Make the background warmer"),
+            "Make the background warmer",
+        )
+
+    def test_edit_prompt_preference_ignores_invalid_state(self):
+        self.assertEqual(main.edit_prompt_preference(["not", "text"]), "")
+
     def test_form_controls_use_ios_safe_font_size(self):
         config = main.demo.get_config_file()
         prompt_inputs = [
