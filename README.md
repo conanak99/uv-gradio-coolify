@@ -68,6 +68,7 @@ CMD ["uv", "run", "python", "main.py"]
 ├── history.py        # Shared completed-history store and rendering
 ├── image_utils.py    # Shared image preparation
 ├── main.py           # Gradio layout and event wiring
+├── models.py         # Registry of edit/generation models and providers
 ├── pyproject.toml    # Project dependencies (managed by uv)
 ├── test_main.py      # Unit tests
 ├── uv.lock           # Locked dependency versions

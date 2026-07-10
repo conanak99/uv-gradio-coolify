@@ -17,7 +17,17 @@ from clients import nano_gpt as nano_gpt_api
 import history
 import image_utils
 import main
+import models
 import workflows
+
+
+GROK_GENERATE = "Grok Imagine (fal.ai)"
+SEEDREAM_LITE_GENERATE = "Seedream 5.0 Lite (NanoGPT)"
+SEEDREAM_PRO_GENERATE = "Seedream 5.0 Pro (NanoGPT)"
+WAN_27_GENERATE = "WAN 2.7 Image (NanoGPT)"
+WAN_27_PRO_GENERATE = "WAN 2.7 Image Pro (NanoGPT)"
+SEEDREAM_PRO_EDIT = "Seedream 5.0 Pro Edit (NanoGPT)"
+WAN_26_EDIT = "WAN 2.6 Image Edit (NanoGPT)"
 
 
 class ImageUtilsTests(unittest.TestCase):
@@ -28,7 +38,7 @@ class ImageUtilsTests(unittest.TestCase):
 
             result = image_utils.closest_aspect_ratio(
                 image_file.name,
-                nano_gpt_api.SEEDREAM_PRO_EDIT_ASPECT_RATIOS,
+                models.SEEDREAM_EDIT_ASPECT_RATIOS,
             )
 
         self.assertEqual(result, "3:2")
@@ -40,7 +50,7 @@ class ImageUtilsTests(unittest.TestCase):
 
             prepared_path, aspect_ratio = image_utils.prepare_for_aspect_ratio(
                 image_file.name,
-                nano_gpt_api.SEEDREAM_PRO_EDIT_ASPECT_RATIOS,
+                models.SEEDREAM_EDIT_ASPECT_RATIOS,
             )
             try:
                 with Image.open(image_file.name) as original:
@@ -101,7 +111,7 @@ class NanoGptTests(unittest.TestCase):
         image_bytes = base64.b64decode(encoded)
         request_body = json.dumps(
             {
-                "model": nano_gpt_api.SEEDREAM_PRO_EDIT_MODEL_ID,
+                "model": models.EDIT_MODELS[SEEDREAM_PRO_EDIT].model_id,
                 "prompt": "Edit this image",
                 "imageDataUrl": data_url,
                 "size": "1:1",
@@ -144,6 +154,7 @@ class NanoGptTests(unittest.TestCase):
                     "bytedance/seedream-v5.0-pro/edit",
                     "/tmp/input.png",
                     "Improve the lighting",
+                    crop_aspect_ratios=models.SEEDREAM_EDIT_ASPECT_RATIOS,
                 )
 
         self.assertEqual(result, "https://image.test/out.png")
@@ -160,7 +171,7 @@ class NanoGptTests(unittest.TestCase):
         self.assertNotIn("input_references", payload)
         prepare_for_aspect_ratio.assert_called_once_with(
             "/tmp/input.png",
-            nano_gpt_api.SEEDREAM_PRO_EDIT_ASPECT_RATIOS,
+            models.SEEDREAM_EDIT_ASPECT_RATIOS,
         )
         image_to_data_url.assert_called_once_with("/tmp/prepared.png")
         logs = "\n".join(captured_logs.output)
@@ -186,14 +197,14 @@ class NanoGptTests(unittest.TestCase):
             patch.object(nano_gpt_api, "urlopen", return_value=response) as urlopen,
         ):
             result = nano_gpt_api.edit_image(
-                nano_gpt_api.WAN_26_EDIT_MODEL_ID,
+                models.EDIT_MODELS[WAN_26_EDIT].model_id,
                 "/tmp/input.png",
                 "Change the jacket color",
             )
 
         self.assertEqual(result, "https://image.test/wan.png")
         payload = json.loads(urlopen.call_args.args[0].data)
-        self.assertEqual(payload["model"], nano_gpt_api.WAN_26_EDIT_MODEL_ID)
+        self.assertEqual(payload["model"], models.EDIT_MODELS[WAN_26_EDIT].model_id)
         self.assertEqual(payload["n"], 1)
         self.assertEqual(
             payload["imageDataUrl"], "data:image/jpeg;base64,aW1hZ2U="
@@ -302,6 +313,18 @@ class FalClientTests(unittest.TestCase):
         self.assertNotIn("https://image.test/fal.png", logs)
 
 
+class ModelRegistryTests(unittest.TestCase):
+    def test_registry_keys_match_model_names(self):
+        for registry in (models.EDIT_MODELS, models.GENERATE_MODELS):
+            for name, model in registry.items():
+                self.assertEqual(name, model.name)
+
+    def test_generate_ratio_overrides_cover_only_ui_ratios(self):
+        for model in models.GENERATE_MODELS.values():
+            for ui_ratio in model.ratio_overrides:
+                self.assertIn(ui_ratio, models.GENERATE_ASPECT_RATIOS)
+
+
 class ProviderRoutingTests(unittest.TestCase):
     def test_elapsed_button_label_formats_seconds_and_minutes(self):
         with patch.object(workflows.time, "monotonic", return_value=112.9):
@@ -317,18 +340,8 @@ class ProviderRoutingTests(unittest.TestCase):
             )
 
     def test_nano_gpt_edit_models_route_to_nano_gpt_client(self):
-        cases = [
-            (
-                workflows.SEEDREAM_PRO_EDIT_MODEL,
-                nano_gpt_api.SEEDREAM_PRO_EDIT_MODEL_ID,
-            ),
-            (
-                workflows.WAN_26_EDIT_MODEL,
-                nano_gpt_api.WAN_26_EDIT_MODEL_ID,
-            ),
-        ]
-
-        for model_name, model_id in cases:
+        for model_name in (SEEDREAM_PRO_EDIT, WAN_26_EDIT):
+            model = models.EDIT_MODELS[model_name]
             with (
                 self.subTest(model=model_name),
                 patch.object(
@@ -337,81 +350,43 @@ class ProviderRoutingTests(unittest.TestCase):
                     return_value="https://image.test/nano.png",
                 ) as edit_image,
             ):
-                result = workflows.run_model(
-                    model_name,
+                result = workflows.run_edit_model(
+                    model,
                     "/tmp/input.png",
                     "Improve the lighting",
                 )
 
                 self.assertEqual(
                     result,
-                    (
-                        "https://image.test/nano.png",
-                        model_name,
-                    ),
+                    [
+                        (
+                            "https://image.test/nano.png",
+                            model_name,
+                        )
+                    ],
                 )
                 edit_image.assert_called_once_with(
-                    model_id,
+                    model.model_id,
                     "/tmp/input.png",
                     "Improve the lighting",
+                    crop_aspect_ratios=model.crop_aspect_ratios,
                 )
 
     def test_nano_gpt_generate_models_route_to_nano_gpt(self):
         cases = [
-            (
-                workflows.SEEDREAM_LITE_GENERATE_MODEL,
-                "16:9",
-                "seedream-v5.0-lite",
-                "2560x1440",
-                "16:9",
-            ),
-            (
-                workflows.SEEDREAM_PRO_GENERATE_MODEL,
-                "3:4",
-                "bytedance/seedream-v5.0-pro",
-                "3:4",
-                "3:4",
-            ),
-            (
-                workflows.SEEDREAM_LITE_GENERATE_MODEL,
-                "4:3",
-                "seedream-v5.0-lite",
-                "3072x2048",
-                "4:3 → 3:2",
-            ),
-            (
-                workflows.SEEDREAM_LITE_GENERATE_MODEL,
-                "3:4",
-                "seedream-v5.0-lite",
-                "2048x3072",
-                "3:4 → 2:3",
-            ),
-            (
-                workflows.WAN_27_GENERATE_MODEL,
-                "16:9",
-                nano_gpt_api.WAN_27_IMAGE_MODEL_ID,
-                "1280*720",
-                "16:9",
-            ),
-            (
-                workflows.WAN_27_PRO_GENERATE_MODEL,
-                "4:3",
-                nano_gpt_api.WAN_27_IMAGE_PRO_MODEL_ID,
-                "1536*1024",
-                "4:3 → 3:2",
-            ),
-            (
-                workflows.WAN_27_GENERATE_MODEL,
-                "3:4",
-                nano_gpt_api.WAN_27_IMAGE_MODEL_ID,
-                "1024*1536",
-                "3:4 → 2:3",
-            ),
+            (SEEDREAM_LITE_GENERATE, "16:9", "2560x1440", "16:9"),
+            (SEEDREAM_PRO_GENERATE, "3:4", "3:4", "3:4"),
+            (SEEDREAM_LITE_GENERATE, "4:3", "3072x2048", "4:3 → 3:2"),
+            (SEEDREAM_LITE_GENERATE, "3:4", "2048x3072", "3:4 → 2:3"),
+            (WAN_27_GENERATE, "16:9", "1280*720", "16:9"),
+            (WAN_27_PRO_GENERATE, "4:3", "1536*1024", "4:3 → 3:2"),
+            (WAN_27_GENERATE, "3:4", "1024*1536", "3:4 → 2:3"),
         ]
 
-        for model_name, ratio, model_id, resolution, expected_ratio in cases:
+        for model_name, ratio, resolution, expected_ratio in cases:
+            model = models.GENERATE_MODELS[model_name]
             with (
-                self.subTest(model=model_name),
+                self.subTest(model=model_name, ratio=ratio),
                 patch.object(
                     workflows.nano_gpt_client,
                     "generate_images",
@@ -419,8 +394,8 @@ class ProviderRoutingTests(unittest.TestCase):
                 ) as generate_images,
             ):
                 result = workflows.run_generate_model(
+                    model,
                     "A lighthouse",
-                    model_name,
                     ratio,
                     2,
                 )
@@ -435,21 +410,23 @@ class ProviderRoutingTests(unittest.TestCase):
                     ],
                 )
                 generate_images.assert_called_once_with(
-                    model_id,
+                    model.model_id,
                     "A lighthouse",
                     resolution,
                     2,
                 )
 
     def test_grok_generation_still_routes_to_fal(self):
+        model = models.GENERATE_MODELS[GROK_GENERATE]
+
         with patch.object(
             workflows.fal_client,
             "generate_images",
             return_value=["https://image.test/grok.png"],
         ) as generate_images:
             result = workflows.run_generate_model(
+                model,
                 "A lighthouse",
-                workflows.GROK_GENERATE_MODEL,
                 "4:3",
                 1,
             )
@@ -459,21 +436,26 @@ class ProviderRoutingTests(unittest.TestCase):
             [
                 (
                     "https://image.test/grok.png",
-                    f"{workflows.GROK_GENERATE_MODEL} (4:3)",
+                    f"{GROK_GENERATE} (4:3)",
                 )
             ],
         )
-        generate_images.assert_called_once_with("A lighthouse", "4:3", 1)
+        generate_images.assert_called_once_with(
+            model.model_id,
+            "A lighthouse",
+            "4:3",
+            1,
+        )
 
     def test_generate_image_runs_all_selected_models(self):
-        models = [
-            workflows.GROK_GENERATE_MODEL,
-            workflows.SEEDREAM_LITE_GENERATE_MODEL,
-            workflows.SEEDREAM_PRO_GENERATE_MODEL,
+        model_names = [
+            GROK_GENERATE,
+            SEEDREAM_LITE_GENERATE,
+            SEEDREAM_PRO_GENERATE,
         ]
 
-        def result_for_model(_prompt, model_name, ratio, _count):
-            return [(f"https://image.test/{model_name}.png", f"{model_name} ({ratio})")]
+        def result_for_model(model, _prompt, ratio, _count):
+            return [(f"https://image.test/{model.name}.png", f"{model.name} ({ratio})")]
 
         with patch.object(
             workflows,
@@ -483,7 +465,7 @@ class ProviderRoutingTests(unittest.TestCase):
             progress_updates = []
             results = workflows.generate_image(
                 "A lighthouse",
-                models,
+                model_names,
                 "1:1",
                 2,
                 progress_updates.append,
@@ -495,18 +477,21 @@ class ProviderRoutingTests(unittest.TestCase):
             [1, 2, 3],
         )
         self.assertEqual(
-            {call.args for call in run_generate_model.call_args_list},
-            {
-                ("A lighthouse", model_name, "1:1", 2)
-                for model_name in models
-            },
+            sorted(
+                (call.args[0].name, *call.args[1:])
+                for call in run_generate_model.call_args_list
+            ),
+            sorted(
+                (model_name, "A lighthouse", "1:1", 2)
+                for model_name in model_names
+            ),
         )
 
     def test_edit_image_reports_each_completed_model(self):
-        models = ["Qwen Image Edit", "FLUX.2 Klein 9B Edit"]
+        model_names = ["Qwen Image Edit", "FLUX.2 Klein 9B Edit"]
 
-        def edit_result(model_name, _image_reference, _prompt):
-            return (f"https://image.test/{model_name}.png", model_name)
+        def edit_result(model, _image_reference, _prompt):
+            return [(f"https://image.test/{model.name}.png", model.name)]
 
         with (
             patch.object(
@@ -514,13 +499,13 @@ class ProviderRoutingTests(unittest.TestCase):
                 "upload_image",
                 return_value="https://image.test/input.png",
             ),
-            patch.object(workflows, "run_model", side_effect=edit_result),
+            patch.object(workflows, "run_edit_model", side_effect=edit_result),
         ):
             progress_updates = []
             results = workflows.edit_image(
                 "/tmp/input.png",
                 "Improve the lighting",
-                models,
+                model_names,
                 progress_updates.append,
             )
 
@@ -539,34 +524,32 @@ class ProviderRoutingTests(unittest.TestCase):
             )
 
     def test_edit_image_uses_remote_url_for_fal_without_upload(self):
-        models = ["Qwen Image Edit"]
+        model_name = "Qwen Image Edit"
 
         with (
             patch.object(workflows.fal_client, "upload_image") as upload_image,
             patch.object(
                 workflows,
-                "run_model",
-                return_value=("https://image.test/output.png", models[0]),
-            ) as run_model,
+                "run_edit_model",
+                return_value=[("https://image.test/output.png", model_name)],
+            ) as run_edit_model,
         ):
             result = workflows.edit_image(
                 "/tmp/uploaded.png",
                 "Improve the lighting",
-                models,
+                [model_name],
                 image_url=" https://image.test/input.png ",
             )
 
-        self.assertEqual(result, [("https://image.test/output.png", models[0])])
+        self.assertEqual(result, [("https://image.test/output.png", model_name)])
         upload_image.assert_not_called()
-        run_model.assert_called_once_with(
-            models[0],
+        run_edit_model.assert_called_once_with(
+            models.EDIT_MODELS[model_name],
             "https://image.test/input.png",
             "Improve the lighting",
         )
 
     def test_edit_image_downloads_remote_url_for_nano_gpt(self):
-        model = "Seedream 5.0 Pro Edit (NanoGPT)"
-
         with (
             patch.object(
                 workflows,
@@ -575,21 +558,23 @@ class ProviderRoutingTests(unittest.TestCase):
             ) as download_image_url,
             patch.object(
                 workflows,
-                "run_model",
-                return_value=("https://image.test/output.png", model),
-            ) as run_model,
+                "run_edit_model",
+                return_value=[("https://image.test/output.png", SEEDREAM_PRO_EDIT)],
+            ) as run_edit_model,
         ):
             result = workflows.edit_image(
                 None,
                 "Improve the lighting",
-                [model],
+                [SEEDREAM_PRO_EDIT],
                 image_url="https://image.test/input.png",
             )
 
-        self.assertEqual(result, [("https://image.test/output.png", model)])
+        self.assertEqual(
+            result, [("https://image.test/output.png", SEEDREAM_PRO_EDIT)]
+        )
         download_image_url.assert_called_once_with("https://image.test/input.png")
-        run_model.assert_called_once_with(
-            model,
+        run_edit_model.assert_called_once_with(
+            models.EDIT_MODELS[SEEDREAM_PRO_EDIT],
             "/tmp/downloaded.png",
             "Improve the lighting",
         )
@@ -686,7 +671,7 @@ class HistoryTests(unittest.TestCase):
         ):
             flow = workflows.generate_image_flow(
                 "This will fail",
-                [workflows.SEEDREAM_PRO_GENERATE_MODEL],
+                [SEEDREAM_PRO_GENERATE],
                 "1:1",
                 "1",
             )
@@ -715,7 +700,7 @@ class HistoryTests(unittest.TestCase):
         outputs = [
             (
                 "https://image.test/generated.png",
-                f"{workflows.SEEDREAM_LITE_GENERATE_MODEL} (1:1)",
+                f"{SEEDREAM_LITE_GENERATE} (1:1)",
             )
         ]
 
@@ -726,8 +711,8 @@ class HistoryTests(unittest.TestCase):
                 workflows.generate_image_flow(
                     "A lighthouse",
                     [
-                        workflows.SEEDREAM_LITE_GENERATE_MODEL,
-                        workflows.SEEDREAM_PRO_GENERATE_MODEL,
+                        SEEDREAM_LITE_GENERATE,
+                        SEEDREAM_PRO_GENERATE,
                     ],
                     "1:1",
                     "1",
@@ -743,11 +728,11 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(entries[0]["operation"], "Generate")
         self.assertEqual(entries[0]["prompt"], "A lighthouse")
         self.assertIn(
-            workflows.SEEDREAM_LITE_GENERATE_MODEL,
+            SEEDREAM_LITE_GENERATE,
             entries[0]["settings"],
         )
         self.assertIn(
-            workflows.SEEDREAM_PRO_GENERATE_MODEL,
+            SEEDREAM_PRO_GENERATE,
             entries[0]["settings"],
         )
         self.assertEqual(final_update[4], "A lighthouse")
@@ -756,8 +741,8 @@ class HistoryTests(unittest.TestCase):
         generate_image.assert_called_once_with(
             "A lighthouse",
             [
-                workflows.SEEDREAM_LITE_GENERATE_MODEL,
-                workflows.SEEDREAM_PRO_GENERATE_MODEL,
+                SEEDREAM_LITE_GENERATE,
+                SEEDREAM_PRO_GENERATE,
             ],
             "1:1",
             1,
@@ -788,8 +773,8 @@ class HistoryTests(unittest.TestCase):
             flow = workflows.generate_image_flow(
                 "Stream a lighthouse",
                 [
-                    workflows.GROK_GENERATE_MODEL,
-                    workflows.SEEDREAM_PRO_GENERATE_MODEL,
+                    GROK_GENERATE,
+                    SEEDREAM_PRO_GENERATE,
                 ],
                 "1:1",
                 "1",
@@ -879,7 +864,7 @@ class HistoryTests(unittest.TestCase):
         outputs = [
             (
                 "https://image.test/disconnected.png",
-                f"{workflows.SEEDREAM_PRO_GENERATE_MODEL} (1:1)",
+                f"{SEEDREAM_PRO_GENERATE} (1:1)",
             )
         ]
 
@@ -890,7 +875,7 @@ class HistoryTests(unittest.TestCase):
         with patch.object(workflows, "generate_image", side_effect=delayed_generation):
             flow = workflows.generate_image_flow(
                 "A lighthouse after disconnect",
-                [workflows.SEEDREAM_PRO_GENERATE_MODEL],
+                [SEEDREAM_PRO_GENERATE],
                 "1:1",
                 "1",
             )

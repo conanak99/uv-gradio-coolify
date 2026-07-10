@@ -1,26 +1,21 @@
 import logging
 import os
 from html import escape
-from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 import gradio as gr
 
 from clients.nano_gpt import OUTPUT_CACHE_PATH
 from history import refresh_history, stored_history_entry_view
-from workflows import (
-    GENERATE_ASPECT_RATIOS,
-    GENERATE_MODEL_MAP,
-    MODEL_MAP,
-    edit_image_flow,
-    generate_image_flow,
-)
+from image_utils import is_http_url
+from models import EDIT_MODELS, GENERATE_ASPECT_RATIOS, GENERATE_MODELS
+from workflows import edit_image_flow, generate_image_flow
 
 
 load_dotenv()
 
-DEFAULT_EDIT_MODELS = list(MODEL_MAP.keys())
-DEFAULT_GENERATE_MODELS = list(GENERATE_MODEL_MAP.keys())
+DEFAULT_EDIT_MODELS = list(EDIT_MODELS)
+DEFAULT_GENERATE_MODELS = list(GENERATE_MODELS)
 BROWSER_STATE_SECRET = os.environ.get(
     "BROWSER_STATE_SECRET",
     "image-studio-browser-state-v1",
@@ -70,8 +65,7 @@ def preview_image_url(image_url: object) -> str:
         return "<p>Enter an image URL to preview it.</p>"
 
     normalized_url = image_url.strip()
-    parsed_url = urlparse(normalized_url)
-    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+    if not is_http_url(normalized_url):
         return "<p>Enter a valid http(s) image URL.</p>"
 
     safe_url = escape(normalized_url, quote=True)
@@ -227,32 +221,26 @@ with gr.Blocks(title="Image Studio") as demo:
                     gr.Markdown("### Outputs")
                     history_gallery = gr.HTML("<p>No outputs yet.</p>")
 
-    history_outputs = [
-        history_selector,
+    history_detail_outputs = [
         history_details,
         history_prompt,
         history_input,
         history_gallery,
     ]
+    history_outputs = [history_selector, *history_detail_outputs]
     edit_btn.click(
         fn=edit_image_flow,
         inputs=[input_image, input_image_url, edit_prompt, models],
         outputs=[edit_gallery, edit_btn, *history_outputs],
     )
-    input_image_url.change(
-        fn=preview_image_url,
-        inputs=[input_image_url],
-        outputs=[input_image_url_preview],
-        queue=False,
-        show_progress="hidden",
-    )
-    input_image_url.submit(
-        fn=preview_image_url,
-        inputs=[input_image_url],
-        outputs=[input_image_url_preview],
-        queue=False,
-        show_progress="hidden",
-    )
+    for url_event in (input_image_url.change, input_image_url.submit):
+        url_event(
+            fn=preview_image_url,
+            inputs=[input_image_url],
+            outputs=[input_image_url_preview],
+            queue=False,
+            show_progress="hidden",
+        )
     models.change(
         fn=save_edit_model_preference,
         inputs=[models],
@@ -282,36 +270,19 @@ with gr.Blocks(title="Image Studio") as demo:
     history_selector.change(
         fn=stored_history_entry_view,
         inputs=[history_selector],
-        outputs=[
-            history_details,
-            history_prompt,
-            history_input,
-            history_gallery,
-        ],
+        outputs=history_detail_outputs,
         queue=False,
         show_progress="hidden",
     )
     history_refresh.click(
         fn=refresh_history,
-        outputs=[
-            history_selector,
-            history_details,
-            history_prompt,
-            history_input,
-            history_gallery,
-        ],
+        outputs=history_outputs,
         queue=False,
         show_progress="hidden",
     )
     demo.load(
         fn=refresh_history,
-        outputs=[
-            history_selector,
-            history_details,
-            history_prompt,
-            history_input,
-            history_gallery,
-        ],
+        outputs=history_outputs,
         queue=False,
         show_progress="hidden",
     )
