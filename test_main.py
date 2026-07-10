@@ -17,10 +17,19 @@ from clients import nano_gpt as nano_gpt_api
 import history
 import image_utils
 import main
+import model_catalog
 import workflows
 
 
 class ImageUtilsTests(unittest.TestCase):
+    def test_normalize_http_url_trims_and_validates_urls(self):
+        self.assertEqual(
+            image_utils.normalize_http_url(" https://image.test/input.png "),
+            "https://image.test/input.png",
+        )
+        self.assertIsNone(image_utils.normalize_http_url("not-a-url"))
+        self.assertIsNone(image_utils.normalize_http_url(None))
+
     def test_closest_aspect_ratio_uses_relative_ratio_distance(self):
         with tempfile.NamedTemporaryFile(suffix=".png") as image_file:
             Image.new("RGB", (1600, 1000), "red").save(image_file)
@@ -133,17 +142,15 @@ class NanoGptTests(unittest.TestCase):
                 ) as image_to_data_url,
                 patch.object(
                     nano_gpt_api,
-                    "prepare_for_aspect_ratio",
-                    return_value=("/tmp/prepared.png", "4:3"),
-                ) as prepare_for_aspect_ratio,
-                patch.object(
-                    nano_gpt_api, "urlopen", return_value=response
+                    "urlopen",
+                    return_value=response,
                 ) as urlopen,
             ):
                 result = nano_gpt_api.edit_image(
                     "bytedance/seedream-v5.0-pro/edit",
                     "/tmp/input.png",
                     "Improve the lighting",
+                    size="4:3",
                 )
 
         self.assertEqual(result, "https://image.test/out.png")
@@ -158,11 +165,7 @@ class NanoGptTests(unittest.TestCase):
             payload["imageDataUrl"], "data:image/png;base64,aW1hZ2U="
         )
         self.assertNotIn("input_references", payload)
-        prepare_for_aspect_ratio.assert_called_once_with(
-            "/tmp/input.png",
-            nano_gpt_api.SEEDREAM_PRO_EDIT_ASPECT_RATIOS,
-        )
-        image_to_data_url.assert_called_once_with("/tmp/prepared.png")
+        image_to_data_url.assert_called_once_with("/tmp/input.png")
         logs = "\n".join(captured_logs.output)
         self.assertIn("request endpoint=", logs)
         self.assertIn("response endpoint=", logs)
@@ -182,7 +185,6 @@ class NanoGptTests(unittest.TestCase):
                 "image_to_data_url",
                 return_value="data:image/jpeg;base64,aW1hZ2U=",
             ) as image_to_data_url,
-            patch.object(nano_gpt_api, "prepare_for_aspect_ratio") as prepare,
             patch.object(nano_gpt_api, "urlopen", return_value=response) as urlopen,
         ):
             result = nano_gpt_api.edit_image(
@@ -200,7 +202,6 @@ class NanoGptTests(unittest.TestCase):
         )
         self.assertNotIn("size", payload)
         self.assertNotIn("resolution", payload)
-        prepare.assert_not_called()
         image_to_data_url.assert_called_once_with("/tmp/input.png")
 
     def test_run_nano_gpt_model_requires_key(self):
@@ -302,6 +303,35 @@ class FalClientTests(unittest.TestCase):
         self.assertNotIn("https://image.test/fal.png", logs)
 
 
+class ModelCatalogTests(unittest.TestCase):
+    def test_catalog_separates_operations_and_has_unique_names(self):
+        all_names = [model.name for model in model_catalog.MODEL_SPECS]
+
+        self.assertEqual(len(all_names), len(set(all_names)))
+        self.assertTrue(
+            all(
+                model.operation is model_catalog.Operation.EDIT
+                for model in model_catalog.EDIT_MODELS.values()
+            )
+        )
+        self.assertTrue(
+            all(
+                model.operation is model_catalog.Operation.GENERATE
+                for model in model_catalog.GENERATE_MODELS.values()
+            )
+        )
+
+    def test_model_spec_maps_requested_ratio_to_provider_resolution(self):
+        model = model_catalog.GENERATE_MODELS[
+            model_catalog.SEEDREAM_LITE_GENERATE_MODEL
+        ]
+
+        self.assertEqual(
+            model.generation_parameters("4:3"),
+            ("3:2", "3072x2048"),
+        )
+
+
 class ProviderRoutingTests(unittest.TestCase):
     def test_elapsed_button_label_formats_seconds_and_minutes(self):
         with patch.object(workflows.time, "monotonic", return_value=112.9):
@@ -321,16 +351,25 @@ class ProviderRoutingTests(unittest.TestCase):
             (
                 workflows.SEEDREAM_PRO_EDIT_MODEL,
                 nano_gpt_api.SEEDREAM_PRO_EDIT_MODEL_ID,
+                "/tmp/prepared.png",
+                {"size": "4:3"},
             ),
             (
                 workflows.WAN_26_EDIT_MODEL,
                 nano_gpt_api.WAN_26_EDIT_MODEL_ID,
+                "/tmp/input.png",
+                {},
             ),
         ]
 
-        for model_name, model_id in cases:
+        for model_name, model_id, expected_path, expected_kwargs in cases:
             with (
                 self.subTest(model=model_name),
+                patch.object(
+                    workflows,
+                    "prepare_for_aspect_ratio",
+                    return_value=("/tmp/prepared.png", "4:3"),
+                ) as prepare_for_aspect_ratio,
                 patch.object(
                     workflows.nano_gpt_client,
                     "edit_image",
@@ -352,9 +391,17 @@ class ProviderRoutingTests(unittest.TestCase):
                 )
                 edit_image.assert_called_once_with(
                     model_id,
-                    "/tmp/input.png",
+                    expected_path,
                     "Improve the lighting",
+                    **expected_kwargs,
                 )
+                if expected_kwargs:
+                    prepare_for_aspect_ratio.assert_called_once_with(
+                        "/tmp/input.png",
+                        nano_gpt_api.SEEDREAM_PRO_EDIT_ASPECT_RATIOS,
+                    )
+                else:
+                    prepare_for_aspect_ratio.assert_not_called()
 
     def test_nano_gpt_generate_models_route_to_nano_gpt(self):
         cases = [
@@ -463,7 +510,12 @@ class ProviderRoutingTests(unittest.TestCase):
                 )
             ],
         )
-        generate_images.assert_called_once_with("A lighthouse", "4:3", 1)
+        generate_images.assert_called_once_with(
+            fal_api.GROK_GENERATE_MODEL_ID,
+            "A lighthouse",
+            "4:3",
+            1,
+        )
 
     def test_generate_image_runs_all_selected_models(self):
         models = [
@@ -863,11 +915,10 @@ class HistoryTests(unittest.TestCase):
             )
 
         edit_image.assert_called_once_with(
-            None,
+            "https://image.test/input.png",
             "Use a URL",
             ["Qwen Image Edit"],
             ANY,
-            image_url="https://image.test/input.png",
         )
         entries = history.get_history()
         self.assertEqual(entries[0]["input_image"], "https://image.test/input.png")

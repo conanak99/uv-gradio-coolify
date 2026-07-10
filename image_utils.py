@@ -3,6 +3,7 @@ import os
 import tempfile
 from io import BytesIO
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from PIL import Image
@@ -10,6 +11,18 @@ from PIL import Image
 
 MAX_DIMENSION = 2048
 MAX_REMOTE_IMAGE_BYTES = 25 * 1024 * 1024
+
+
+def normalize_http_url(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return normalized
 
 
 def aspect_ratio_value(aspect_ratio: str) -> float:

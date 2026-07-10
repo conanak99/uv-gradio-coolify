@@ -32,6 +32,11 @@ Then open the URL printed in the terminal (defaults to <http://127.0.0.1:7860>).
 | `NANO_GPT_KEY` | — | NanoGPT API key used by Seedream/WAN generation and Seedream/WAN edit models. |
 | `LOG_LEVEL` | `INFO` | Application log level. Request logs exclude credentials, prompts, image data, and output URLs. |
 
+## Adding models and providers
+
+- Add edit or generation models to `MODEL_SPECS` in `model_catalog.py`. The UI choices, API IDs, provider routing, aspect-ratio mapping, and resolutions are derived from that catalog.
+- Provider HTTP/SDK details belong in `clients/`. When adding a provider, add its enum value and one routing branch for edit and/or generation in `workflows.py`.
+
 ## Deploying
 
 The app reads `PORT` from the environment and binds to `0.0.0.0`, so it works out of the box on platforms that:
@@ -68,6 +73,7 @@ CMD ["uv", "run", "python", "main.py"]
 ├── history.py        # Shared completed-history store and rendering
 ├── image_utils.py    # Shared image preparation
 ├── main.py           # Gradio layout and event wiring
+├── model_catalog.py  # Model metadata, providers, and operations
 ├── pyproject.toml    # Project dependencies (managed by uv)
 ├── test_main.py      # Unit tests
 ├── uv.lock           # Locked dependency versions

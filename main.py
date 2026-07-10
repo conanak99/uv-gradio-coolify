@@ -1,13 +1,13 @@
 import logging
 import os
 from html import escape
-from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 import gradio as gr
 
 from clients.nano_gpt import OUTPUT_CACHE_PATH
 from history import refresh_history, stored_history_entry_view
+from image_utils import normalize_http_url
 from workflows import (
     GENERATE_ASPECT_RATIOS,
     GENERATE_MODEL_MAP,
@@ -69,9 +69,8 @@ def preview_image_url(image_url: object) -> str:
     if not isinstance(image_url, str) or not image_url.strip():
         return "<p>Enter an image URL to preview it.</p>"
 
-    normalized_url = image_url.strip()
-    parsed_url = urlparse(normalized_url)
-    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+    normalized_url = normalize_http_url(image_url)
+    if not normalized_url:
         return "<p>Enter a valid http(s) image URL.</p>"
 
     safe_url = escape(normalized_url, quote=True)

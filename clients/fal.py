@@ -5,11 +5,10 @@ from typing import Any
 import fal_client
 
 from image_utils import resize_if_needed
+from model_catalog import GROK_GENERATE_MODEL_ID
 
 
 logger = logging.getLogger(__name__)
-
-GROK_GENERATE_MODEL_ID = "xai/grok-imagine-image"
 
 
 def upload_image(image_path: str) -> str:
@@ -72,18 +71,23 @@ def edit_image(model_id: str, image_url: str, prompt: str) -> str | None:
     return images[0]["url"] if images else None
 
 
-def generate_images(prompt: str, aspect_ratio: str, num_images: int) -> list[str]:
+def generate_images(
+    model_id: str,
+    prompt: str,
+    aspect_ratio: str,
+    num_images: int,
+) -> list[str]:
     started_at = time.monotonic()
     logger.info(
         "request operation=generate model=%s prompt_chars=%d outputs=%d aspect_ratio=%s",
-        GROK_GENERATE_MODEL_ID,
+        model_id,
         len(prompt),
         num_images,
         aspect_ratio,
     )
     try:
         result: dict[str, Any] = fal_client.subscribe(
-            GROK_GENERATE_MODEL_ID,
+            model_id,
             arguments={
                 "prompt": prompt,
                 "num_images": num_images,
@@ -96,7 +100,7 @@ def generate_images(prompt: str, aspect_ratio: str, num_images: int) -> list[str
     except Exception as exc:
         logger.error(
             "response operation=generate model=%s status=error duration_ms=%d error_type=%s",
-            GROK_GENERATE_MODEL_ID,
+            model_id,
             int((time.monotonic() - started_at) * 1000),
             type(exc).__name__,
         )
@@ -104,7 +108,7 @@ def generate_images(prompt: str, aspect_ratio: str, num_images: int) -> list[str
     images = [image["url"] for image in result.get("images", [])]
     logger.info(
         "response operation=generate model=%s status=success duration_ms=%d images=%d",
-        GROK_GENERATE_MODEL_ID,
+        model_id,
         int((time.monotonic() - started_at) * 1000),
         len(images),
     )

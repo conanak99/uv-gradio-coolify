@@ -3,8 +3,8 @@ import logging
 import queue
 import time
 from collections.abc import Callable, Iterator
+from functools import partial
 from typing import Any
-from urllib.parse import urlparse
 
 from clients import fal as fal_client
 from clients import nano_gpt as nano_gpt_client
@@ -17,73 +17,46 @@ from history import (
     history_view,
     unchanged_history_view,
 )
-from image_utils import download_image_url
+from image_utils import (
+    download_image_url,
+    normalize_http_url,
+    prepare_for_aspect_ratio,
+)
+from model_catalog import (
+    EDIT_MODELS,
+    GENERATE_ASPECT_RATIOS,
+    GENERATE_MODELS,
+    GROK_GENERATE_MODEL,
+    Operation,
+    Provider,
+    SEEDREAM_LITE_GENERATE_MODEL,
+    SEEDREAM_PRO_EDIT_MODEL,
+    SEEDREAM_PRO_GENERATE_MODEL,
+    WAN_26_EDIT_MODEL,
+    WAN_27_GENERATE_MODEL,
+    WAN_27_PRO_GENERATE_MODEL,
+)
 
 
 logger = logging.getLogger(__name__)
-
-SEEDREAM_PRO_EDIT_MODEL = "Seedream 5.0 Pro Edit (NanoGPT)"
-WAN_26_EDIT_MODEL = "WAN 2.6 Image Edit (NanoGPT)"
 
 type ImageReference = str
 type ModelName = str
 type ProgressCallback = Callable[[list[GalleryItem]], None]
 type CompletedJob = tuple[str, list[GalleryItem]]
+type ModelCall = Callable[[], GalleryItem | list[GalleryItem] | None]
 
-
+# Keep these simple name-to-ID maps for UI choices and backwards compatibility.
 MODEL_MAP: dict[ModelName, str] = {
-    "Qwen Image Edit": "fal-ai/qwen-image-edit-2511",
-    "FLUX.2 Klein 9B Edit": "fal-ai/flux-2/klein/9b/edit",
-    "Grok Imagine Image Edit": "xai/grok-imagine-image/edit",
-    SEEDREAM_PRO_EDIT_MODEL: nano_gpt_client.SEEDREAM_PRO_EDIT_MODEL_ID,
-    WAN_26_EDIT_MODEL: nano_gpt_client.WAN_26_EDIT_MODEL_ID,
+    name: model.api_id for name, model in EDIT_MODELS.items()
 }
-NANO_GPT_MODELS = {SEEDREAM_PRO_EDIT_MODEL, WAN_26_EDIT_MODEL}
-
-GROK_GENERATE_MODEL = "Grok Imagine (fal.ai)"
-SEEDREAM_LITE_GENERATE_MODEL = "Seedream 5.0 Lite (NanoGPT)"
-SEEDREAM_PRO_GENERATE_MODEL = "Seedream 5.0 Pro (NanoGPT)"
-WAN_27_GENERATE_MODEL = "WAN 2.7 Image (NanoGPT)"
-WAN_27_PRO_GENERATE_MODEL = "WAN 2.7 Image Pro (NanoGPT)"
 GENERATE_MODEL_MAP: dict[ModelName, str] = {
-    GROK_GENERATE_MODEL: fal_client.GROK_GENERATE_MODEL_ID,
-    SEEDREAM_LITE_GENERATE_MODEL: "seedream-v5.0-lite",
-    SEEDREAM_PRO_GENERATE_MODEL: "bytedance/seedream-v5.0-pro",
-    WAN_27_GENERATE_MODEL: nano_gpt_client.WAN_27_IMAGE_MODEL_ID,
-    WAN_27_PRO_GENERATE_MODEL: nano_gpt_client.WAN_27_IMAGE_PRO_MODEL_ID,
+    name: model.api_id for name, model in GENERATE_MODELS.items()
 }
-GENERATE_ASPECT_RATIOS = ["16:9", "4:3", "1:1", "3:4", "9:16"]
-WAN_27_GENERATE_MODELS = {
-    WAN_27_GENERATE_MODEL,
-    WAN_27_PRO_GENERATE_MODEL,
-}
-SEEDREAM_LITE_RATIO_MAP = {
-    "16:9": "16:9",
-    "4:3": "3:2",
-    "1:1": "1:1",
-    "3:4": "2:3",
-    "9:16": "9:16",
-}
-SEEDREAM_LITE_RESOLUTIONS = {
-    "1:1": "2048x2048",
-    "16:9": "2560x1440",
-    "9:16": "1440x2560",
-    "3:2": "3072x2048",
-    "2:3": "2048x3072",
-}
-WAN_27_RATIO_MAP = {
-    "16:9": "16:9",
-    "4:3": "3:2",
-    "1:1": "1:1",
-    "3:4": "2:3",
-    "9:16": "9:16",
-}
-WAN_27_RESOLUTIONS = {
-    "1:1": "1024*1024",
-    "16:9": "1280*720",
-    "9:16": "720*1280",
-    "3:2": "1536*1024",
-    "2:3": "1024*1536",
+NANO_GPT_MODELS = {
+    name
+    for name, model in EDIT_MODELS.items()
+    if model.provider is Provider.NANO_GPT
 }
 
 JOB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8)
@@ -94,12 +67,11 @@ def normalize_image_url(image_url: str | None) -> str | None:
     if not image_url:
         return None
 
-    normalized_url = image_url.strip()
-    if not normalized_url:
+    if not image_url.strip():
         return None
 
-    parsed_url = urlparse(normalized_url)
-    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+    normalized_url = normalize_http_url(image_url)
+    if not normalized_url:
         raise gr.Error("Please provide a valid http(s) image URL.")
     return normalized_url
 
@@ -117,7 +89,7 @@ def select_edit_image_input(
 
 
 def is_remote_image_reference(image_reference: ImageReference) -> bool:
-    return urlparse(image_reference).scheme in {"http", "https"}
+    return normalize_http_url(image_reference) is not None
 
 
 def elapsed_button_label(action: str, started_at: float) -> str:
@@ -131,12 +103,98 @@ def elapsed_button_label(action: str, started_at: float) -> str:
 def run_model(
     model_name: ModelName, image_reference: ImageReference, prompt: str
 ) -> GalleryItem | None:
-    model_id = MODEL_MAP[model_name]
-    if model_name in NANO_GPT_MODELS:
-        image_url = nano_gpt_client.edit_image(model_id, image_reference, prompt)
+    model = EDIT_MODELS[model_name]
+    if model.provider is Provider.FAL:
+        image_url = fal_client.edit_image(model.api_id, image_reference, prompt)
+    elif model.provider is Provider.NANO_GPT:
+        prepared_reference = image_reference
+        size = None
+        if model.edit_aspect_ratios:
+            prepared_reference, size = prepare_for_aspect_ratio(
+                image_reference,
+                model.edit_aspect_ratios,
+            )
+        image_url = nano_gpt_client.edit_image(
+            model.api_id,
+            prepared_reference,
+            prompt,
+            **({"size": size} if size else {}),
+        )
     else:
-        image_url = fal_client.edit_image(model_id, image_reference, prompt)
+        raise RuntimeError(f"Unsupported provider: {model.provider.value}")
     return (image_url, model_name) if image_url else None
+
+
+def _prepare_edit_references(
+    image_reference: ImageReference,
+    models: list[ModelName],
+) -> dict[Provider, ImageReference]:
+    providers = {EDIT_MODELS[name].provider for name in models}
+    references: dict[Provider, ImageReference] = {}
+    if Provider.FAL in providers:
+        references[Provider.FAL] = (
+            image_reference
+            if is_remote_image_reference(image_reference)
+            else fal_client.upload_image(image_reference)
+        )
+    if Provider.NANO_GPT in providers:
+        references[Provider.NANO_GPT] = (
+            download_image_url(image_reference)
+            if is_remote_image_reference(image_reference)
+            else image_reference
+        )
+    return references
+
+
+def _result_items(
+    result: GalleryItem | list[GalleryItem] | None,
+) -> list[GalleryItem]:
+    if result is None:
+        return []
+    if isinstance(result, list):
+        return result
+    return [result]
+
+
+def run_parallel_model_calls(
+    operation: Operation,
+    calls: dict[ModelName, ModelCall],
+    progress_callback: ProgressCallback | None = None,
+) -> list[GalleryItem]:
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = {
+            executor.submit(model_call): model_name
+            for model_name, model_call in calls.items()
+        }
+        results: list[GalleryItem] = []
+        errors: list[str] = []
+        for future in concurrent.futures.as_completed(futures):
+            model_name = futures[future]
+            try:
+                new_results = _result_items(future.result())
+            except Exception as exc:
+                errors.append(f"{model_name}: {exc}")
+                logger.warning(
+                    "model response operation=%s model=%s status=error error_type=%s",
+                    operation.log_name,
+                    model_name,
+                    type(exc).__name__,
+                )
+                continue
+            if new_results:
+                results.extend(new_results)
+                if progress_callback:
+                    progress_callback(list(results))
+
+    model_description = (
+        "generation model" if operation is Operation.GENERATE else "model"
+    )
+    if not results:
+        detail = "; ".join(errors) if errors else "no images returned"
+        raise gr.Error(f"All {model_description} calls failed ({detail}).")
+    if errors:
+        gr.Warning(f"Some {model_description}s failed: {'; '.join(errors)}")
+    return results
 
 
 def edit_image(
@@ -151,59 +209,20 @@ def edit_image(
         raise gr.Error("Please provide a prompt.")
     if not models:
         raise gr.Error("Please select at least one model.")
+    if any(model not in EDIT_MODELS for model in models):
+        raise gr.Error("Please select valid edit models.")
 
-    image_references: dict[ModelName, ImageReference] = {}
-    if any(model not in NANO_GPT_MODELS for model in models):
-        fal_image_url = (
-            image_reference
-            if is_remote_image_reference(image_reference)
-            else fal_client.upload_image(image_reference)
+    references = _prepare_edit_references(image_reference, models)
+    calls = {
+        model_name: partial(
+            run_model,
+            model_name,
+            references[EDIT_MODELS[model_name].provider],
+            prompt,
         )
-        image_references.update(
-            (model, fal_image_url)
-            for model in models
-            if model not in NANO_GPT_MODELS
-        )
-    if any(model in NANO_GPT_MODELS for model in models):
-        nano_image_path = (
-            download_image_url(image_reference)
-            if is_remote_image_reference(image_reference)
-            else image_reference
-        )
-        image_references.update(
-            (model, nano_image_path) for model in models if model in NANO_GPT_MODELS
-        )
-
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures: dict[concurrent.futures.Future[GalleryItem | None], ModelName] = {
-            executor.submit(run_model, name, image_references[name], prompt): name
-            for name in models
-        }
-        results: list[GalleryItem] = []
-        errors: list[str] = []
-        for future in concurrent.futures.as_completed(futures):
-            model_name = futures[future]
-            try:
-                result = future.result()
-            except Exception as exc:
-                errors.append(f"{model_name}: {exc}")
-                logger.warning(
-                    "model response operation=edit model=%s status=error error_type=%s",
-                    model_name,
-                    type(exc).__name__,
-                )
-                continue
-            if result:
-                results.append(result)
-                if progress_callback:
-                    progress_callback(list(results))
-
-    if not results:
-        detail = "; ".join(errors) if errors else "no images returned"
-        raise gr.Error(f"All model calls failed ({detail}).")
-    if errors:
-        gr.Warning(f"Some models failed: {'; '.join(errors)}")
-    return results
+        for model_name in models
+    }
+    return run_parallel_model_calls(Operation.EDIT, calls, progress_callback)
 
 
 def run_generate_model(
@@ -212,24 +231,24 @@ def run_generate_model(
     aspect_ratio: str,
     num_images: int,
 ) -> list[GalleryItem]:
-    output_ratio = aspect_ratio
-    if model_name == GROK_GENERATE_MODEL:
-        image_urls = fal_client.generate_images(prompt, aspect_ratio, num_images)
-    else:
-        if model_name == SEEDREAM_LITE_GENERATE_MODEL:
-            output_ratio = SEEDREAM_LITE_RATIO_MAP[aspect_ratio]
-            resolution = SEEDREAM_LITE_RESOLUTIONS[output_ratio]
-        elif model_name in WAN_27_GENERATE_MODELS:
-            output_ratio = WAN_27_RATIO_MAP[aspect_ratio]
-            resolution = WAN_27_RESOLUTIONS[output_ratio]
-        else:
-            resolution = aspect_ratio
+    model = GENERATE_MODELS[model_name]
+    output_ratio, resolution = model.generation_parameters(aspect_ratio)
+    if model.provider is Provider.FAL:
+        image_urls = fal_client.generate_images(
+            model.api_id,
+            prompt,
+            output_ratio,
+            num_images,
+        )
+    elif model.provider is Provider.NANO_GPT:
         image_urls = nano_gpt_client.generate_images(
-            GENERATE_MODEL_MAP[model_name],
+            model.api_id,
             prompt,
             resolution,
             num_images,
         )
+    else:
+        raise RuntimeError(f"Unsupported provider: {model.provider.value}")
 
     ratio_label = (
         aspect_ratio
@@ -255,41 +274,17 @@ def generate_image(
     if aspect_ratio not in GENERATE_ASPECT_RATIOS:
         raise gr.Error("Please select a valid aspect ratio.")
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures: dict[
-            concurrent.futures.Future[list[GalleryItem]], ModelName
-        ] = {
-            executor.submit(
-                run_generate_model,
-                prompt,
-                model_name,
-                aspect_ratio,
-                num_images,
-            ): model_name
-            for model_name in models
-        }
-        results: list[GalleryItem] = []
-        errors: list[str] = []
-        for future in concurrent.futures.as_completed(futures):
-            model_name = futures[future]
-            try:
-                results.extend(future.result())
-                if progress_callback:
-                    progress_callback(list(results))
-            except Exception as exc:
-                errors.append(f"{model_name}: {exc}")
-                logger.warning(
-                    "model response operation=generate model=%s status=error error_type=%s",
-                    model_name,
-                    type(exc).__name__,
-                )
-
-    if not results:
-        detail = "; ".join(errors) if errors else "no images returned"
-        raise gr.Error(f"All generation model calls failed ({detail}).")
-    if errors:
-        gr.Warning(f"Some generation models failed: {'; '.join(errors)}")
-    return results
+    calls = {
+        model_name: partial(
+            run_generate_model,
+            prompt,
+            model_name,
+            aspect_ratio,
+            num_images,
+        )
+        for model_name in models
+    }
+    return run_parallel_model_calls(Operation.GENERATE, calls, progress_callback)
 
 
 def iter_job_progress(
@@ -311,6 +306,48 @@ def iter_job_progress(
         next_heartbeat = time.monotonic() + heartbeat_seconds
 
 
+def run_history_job(
+    operation: Operation,
+    prompt: str,
+    models: list[ModelName],
+    input_image: str | None,
+    settings: str,
+    model_calls: Callable[[], list[GalleryItem]],
+) -> CompletedJob:
+    started_at = time.monotonic()
+    logger.info(
+        "job request operation=%s models=%d prompt_chars=%d",
+        operation.log_name,
+        len(models),
+        len(prompt),
+    )
+    try:
+        results = model_calls()
+    except Exception as exc:
+        logger.error(
+            "job response operation=%s status=error duration_ms=%d error_type=%s",
+            operation.log_name,
+            int((time.monotonic() - started_at) * 1000),
+            type(exc).__name__,
+        )
+        raise
+    entry_id = add_history_entry(
+        operation=operation.value,
+        prompt=prompt,
+        input_image=input_image,
+        outputs=results,
+        settings=settings,
+    )
+    logger.info(
+        "job response operation=%s status=success duration_ms=%d images=%d history_id=%s",
+        operation.log_name,
+        int((time.monotonic() - started_at) * 1000),
+        len(results),
+        entry_id,
+    )
+    return entry_id, results
+
+
 def run_edit_job(
     image_path: str | None,
     image_url: str | None,
@@ -318,42 +355,61 @@ def run_edit_job(
     models: list[ModelName],
     progress_queue: queue.Queue[list[GalleryItem]],
 ) -> CompletedJob:
-    started_at = time.monotonic()
     image_reference = select_edit_image_input(image_path, image_url)
-    logger.info(
-        "job request operation=edit models=%d prompt_chars=%d",
-        len(models),
-        len(prompt),
-    )
-    try:
-        results = edit_image(
-            image_path,
+    return run_history_job(
+        Operation.EDIT,
+        prompt,
+        models,
+        image_reference,
+        f'Models: {", ".join(models)}',
+        partial(
+            edit_image,
+            image_reference,
             prompt,
             models,
             progress_queue.put,
-            image_url=image_url,
+        ),
+    )
+
+
+def stream_job(
+    future: concurrent.futures.Future[CompletedJob],
+    progress_queue: queue.Queue[list[GalleryItem]],
+    action: str,
+    idle_button_label: str,
+):
+    started_at = time.monotonic()
+    yield (
+        gr.update(),
+        gr.update(
+            interactive=False,
+            value=elapsed_button_label(action, started_at),
+        ),
+        *unchanged_history_view(),
+    )
+    for partial_results in iter_job_progress(future, progress_queue):
+        yield (
+            partial_results if partial_results is not None else gr.update(),
+            gr.update(
+                interactive=False,
+                value=elapsed_button_label(action, started_at),
+            ),
+            *unchanged_history_view(),
         )
-    except Exception as exc:
-        logger.error(
-            "job response operation=edit status=error duration_ms=%d error_type=%s",
-            int((time.monotonic() - started_at) * 1000),
-            type(exc).__name__,
+    try:
+        entry_id, results = future.result()
+    except BaseException:
+        yield (
+            gr.update(),
+            gr.update(interactive=True, value=idle_button_label),
+            *unchanged_history_view(),
         )
         raise
-    entry_id = add_history_entry(
-        operation="Edit",
-        prompt=prompt,
-        input_image=image_reference,
-        outputs=results,
-        settings=f'Models: {", ".join(models)}',
+    yield (
+        results,
+        gr.update(interactive=True, value=idle_button_label),
+        *history_view(get_history(), entry_id),
     )
-    logger.info(
-        "job response operation=edit status=success duration_ms=%d images=%d history_id=%s",
-        int((time.monotonic() - started_at) * 1000),
-        len(results),
-        entry_id,
-    )
-    return entry_id, results
 
 
 def edit_image_flow(
@@ -362,7 +418,6 @@ def edit_image_flow(
     prompt: str,
     models: list[ModelName],
 ):
-    started_at = time.monotonic()
     progress_queue: queue.Queue[list[GalleryItem]] = queue.Queue()
     future = JOB_EXECUTOR.submit(
         run_edit_job,
@@ -372,37 +427,7 @@ def edit_image_flow(
         models,
         progress_queue,
     )
-    yield (
-        gr.update(),
-        gr.update(
-            interactive=False,
-            value=elapsed_button_label("Editing", started_at),
-        ),
-        *unchanged_history_view(),
-    )
-    for partial_results in iter_job_progress(future, progress_queue):
-        yield (
-            partial_results if partial_results is not None else gr.update(),
-            gr.update(
-                interactive=False,
-                value=elapsed_button_label("Editing", started_at),
-            ),
-            *unchanged_history_view(),
-        )
-    try:
-        entry_id, results = future.result()
-    except BaseException:
-        yield (
-            gr.update(),
-            gr.update(interactive=True, value="Edit Image"),
-            *unchanged_history_view(),
-        )
-        raise
-    yield (
-        results,
-        gr.update(interactive=True, value="Edit Image"),
-        *history_view(get_history(), entry_id),
-    )
+    yield from stream_job(future, progress_queue, "Editing", "Edit Image")
 
 
 def run_generate_job(
@@ -412,46 +437,24 @@ def run_generate_job(
     num_images: int,
     progress_queue: queue.Queue[list[GalleryItem]],
 ) -> CompletedJob:
-    started_at = time.monotonic()
-    logger.info(
-        "job request operation=generate models=%d prompt_chars=%d outputs_per_model=%d aspect_ratio=%s",
-        len(models),
-        len(prompt),
-        num_images,
-        aspect_ratio,
-    )
-    try:
-        results = generate_image(
+    return run_history_job(
+        Operation.GENERATE,
+        prompt,
+        models,
+        None,
+        (
+            f'Models: {", ".join(models)} · Aspect ratio: {aspect_ratio} · '
+            f"Images: {num_images}"
+        ),
+        partial(
+            generate_image,
             prompt,
             models,
             aspect_ratio,
             num_images,
             progress_queue.put,
-        )
-    except Exception as exc:
-        logger.error(
-            "job response operation=generate status=error duration_ms=%d error_type=%s",
-            int((time.monotonic() - started_at) * 1000),
-            type(exc).__name__,
-        )
-        raise
-    entry_id = add_history_entry(
-        operation="Generate",
-        prompt=prompt,
-        input_image=None,
-        outputs=results,
-        settings=(
-            f'Models: {", ".join(models)} · Aspect ratio: {aspect_ratio} · '
-            f"Images: {num_images}"
         ),
     )
-    logger.info(
-        "job response operation=generate status=success duration_ms=%d images=%d history_id=%s",
-        int((time.monotonic() - started_at) * 1000),
-        len(results),
-        entry_id,
-    )
-    return entry_id, results
 
 
 def generate_image_flow(
@@ -460,7 +463,6 @@ def generate_image_flow(
     aspect_ratio: str,
     num_images: str,
 ):
-    started_at = time.monotonic()
     progress_queue: queue.Queue[list[GalleryItem]] = queue.Queue()
     future = JOB_EXECUTOR.submit(
         run_generate_job,
@@ -470,34 +472,4 @@ def generate_image_flow(
         int(num_images),
         progress_queue,
     )
-    yield (
-        gr.update(),
-        gr.update(
-            interactive=False,
-            value=elapsed_button_label("Generating", started_at),
-        ),
-        *unchanged_history_view(),
-    )
-    for partial_results in iter_job_progress(future, progress_queue):
-        yield (
-            partial_results if partial_results is not None else gr.update(),
-            gr.update(
-                interactive=False,
-                value=elapsed_button_label("Generating", started_at),
-            ),
-            *unchanged_history_view(),
-        )
-    try:
-        entry_id, results = future.result()
-    except BaseException:
-        yield (
-            gr.update(),
-            gr.update(interactive=True, value="Generate"),
-            *unchanged_history_view(),
-        )
-        raise
-    yield (
-        results,
-        gr.update(interactive=True, value="Generate"),
-        *history_view(get_history(), entry_id),
-    )
+    yield from stream_job(future, progress_queue, "Generating", "Generate")
