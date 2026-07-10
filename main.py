@@ -22,9 +22,11 @@ log_level = getattr(
     logging.INFO,
 )
 logging.basicConfig(
-    level=log_level,
+    level=logging.WARNING,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
+for logger_name in ("clients.fal", "clients.nano_gpt", "history", "workflows"):
+    logging.getLogger(logger_name).setLevel(log_level)
 
 PROMPT_CSS = """
 .prompt-input textarea,
