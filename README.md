@@ -19,12 +19,15 @@ Then open the URL printed in the terminal (defaults to <http://127.0.0.1:7860>).
 ## Notes
 
 - **Image resizing**: Input images with any dimension larger than 2048px are automatically scaled down (preserving aspect ratio) before being sent to the model, which supports a maximum of 2048×2048.
+- **History**: Each browser session keeps its latest 10 successful edit and generation requests in memory. History is cleared when the session or app restarts.
 
 ## Configuration
 
 | Env var | Default | Description |
 | --- | --- | --- |
 | `PORT` | auto (`7860` if free) | Port the Gradio server binds to. Most PaaS platforms inject this automatically. |
+| `FAL_KEY` | — | fal.ai API key used by the fal.ai edit and generation models. |
+| `NANO_GPT_KEY` | — | NanoGPT API key used by the Seedream 5.0 Pro Edit model. |
 
 ## Deploying
 
@@ -56,8 +59,13 @@ CMD ["uv", "run", "python", "main.py"]
 
 ```
 .
-├── main.py           # Gradio app entrypoint
-├── pyproject.toml    # Project + dependencies (managed by uv)
+├── clients/
+│   ├── fal.py        # fal.ai API client
+│   └── nano_gpt.py   # NanoGPT API client
+├── image_utils.py    # Shared image preparation
+├── main.py           # Gradio UI and orchestration
+├── pyproject.toml    # Project dependencies (managed by uv)
+├── test_main.py      # Unit tests
 ├── uv.lock           # Locked dependency versions
 └── README.md
 ```
