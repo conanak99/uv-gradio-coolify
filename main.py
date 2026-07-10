@@ -1,3 +1,4 @@
+import logging
 import os
 
 from dotenv import load_dotenv
@@ -14,6 +15,16 @@ from workflows import (
 
 
 load_dotenv()
+
+log_level = getattr(
+    logging,
+    os.environ.get("LOG_LEVEL", "INFO").upper(),
+    logging.INFO,
+)
+logging.basicConfig(
+    level=log_level,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
 
 PROMPT_CSS = """
 .prompt-input textarea,

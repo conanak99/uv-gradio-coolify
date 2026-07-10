@@ -32,18 +32,23 @@ class NanoGptTests(unittest.TestCase):
     def test_run_nano_gpt_model_uses_env_key_and_edit_model(self):
         response = io.BytesIO(json.dumps({"data": [{"url": "https://image.test/out.png"}]}).encode())
 
-        with (
-            patch.dict(os.environ, {"NANO_GPT_KEY": "test-key"}),
-            patch.object(
-                nano_gpt_api, "image_to_data_url", return_value="data:image/png;base64,aW1hZ2U="
-            ),
-            patch.object(nano_gpt_api, "urlopen", return_value=response) as urlopen,
-        ):
-            result = nano_gpt_api.edit_image(
-                "bytedance/seedream-v5.0-pro/edit",
-                "/tmp/input.png",
-                "Improve the lighting",
-            )
+        with self.assertLogs("clients.nano_gpt", level="INFO") as captured_logs:
+            with (
+                patch.dict(os.environ, {"NANO_GPT_KEY": "test-key"}),
+                patch.object(
+                    nano_gpt_api,
+                    "image_to_data_url",
+                    return_value="data:image/png;base64,aW1hZ2U=",
+                ),
+                patch.object(
+                    nano_gpt_api, "urlopen", return_value=response
+                ) as urlopen,
+            ):
+                result = nano_gpt_api.edit_image(
+                    "bytedance/seedream-v5.0-pro/edit",
+                    "/tmp/input.png",
+                    "Improve the lighting",
+                )
 
         self.assertEqual(result, "https://image.test/out.png")
         request = urlopen.call_args.args[0]
@@ -56,6 +61,12 @@ class NanoGptTests(unittest.TestCase):
             payload["imageDataUrl"], "data:image/png;base64,aW1hZ2U="
         )
         self.assertNotIn("input_references", payload)
+        logs = "\n".join(captured_logs.output)
+        self.assertIn("request endpoint=", logs)
+        self.assertIn("response endpoint=", logs)
+        self.assertNotIn("test-key", logs)
+        self.assertNotIn("aW1hZ2U=", logs)
+        self.assertNotIn("Improve the lighting", logs)
 
     def test_run_nano_gpt_model_requires_key(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -114,16 +125,17 @@ class NanoGptTests(unittest.TestCase):
 
 class FalClientTests(unittest.TestCase):
     def test_edit_image_builds_fal_request(self):
-        with patch.object(
-            fal_api.fal_client,
-            "subscribe",
-            return_value={"images": [{"url": "https://image.test/fal.png"}]},
-        ) as subscribe:
-            result = fal_api.edit_image(
-                "fal-ai/qwen-image-edit-2511",
-                "https://image.test/input.png",
-                "Improve the lighting",
-            )
+        with self.assertLogs("clients.fal", level="INFO") as captured_logs:
+            with patch.object(
+                fal_api.fal_client,
+                "subscribe",
+                return_value={"images": [{"url": "https://image.test/fal.png"}]},
+            ) as subscribe:
+                result = fal_api.edit_image(
+                    "fal-ai/qwen-image-edit-2511",
+                    "https://image.test/input.png",
+                    "Improve the lighting",
+                )
 
         self.assertEqual(result, "https://image.test/fal.png")
         subscribe.assert_called_once_with(
@@ -136,6 +148,12 @@ class FalClientTests(unittest.TestCase):
                 "enable_safety_checker": False,
             },
         )
+        logs = "\n".join(captured_logs.output)
+        self.assertIn("request operation=edit", logs)
+        self.assertIn("response operation=edit", logs)
+        self.assertNotIn("Improve the lighting", logs)
+        self.assertNotIn("https://image.test/input.png", logs)
+        self.assertNotIn("https://image.test/fal.png", logs)
 
 
 class ProviderRoutingTests(unittest.TestCase):
@@ -341,6 +359,23 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(len(entries), 10)
         self.assertEqual(entries[0]["prompt"], "Prompt 10")
         self.assertEqual(entries[-1]["prompt"], "Prompt 1")
+
+    def test_history_addition_logs_safe_metadata(self):
+        with self.assertLogs("history", level="INFO") as captured_logs:
+            entry_id = history.add_history_entry(
+                operation="Generate",
+                prompt="Private prompt text",
+                input_image=None,
+                outputs=[("https://image.test/private.png", "Model")],
+                settings="Model: Test",
+            )
+
+        logs = "\n".join(captured_logs.output)
+        self.assertIn(f"history added id={entry_id}", logs)
+        self.assertIn("operation=Generate", logs)
+        self.assertIn("outputs=1", logs)
+        self.assertNotIn("Private prompt text", logs)
+        self.assertNotIn("https://image.test/private.png", logs)
 
     def test_history_entry_view_returns_selected_input_and_outputs(self):
         outputs = [("https://image.test/edited.png", "Edit Model")]

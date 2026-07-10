@@ -1,4 +1,5 @@
 from html import escape
+import logging
 import threading
 import time
 from typing import Any, TypedDict
@@ -7,6 +8,8 @@ import uuid
 
 import gradio as gr
 
+
+logger = logging.getLogger(__name__)
 
 type GalleryItem = tuple[str, str]
 type History = list["HistoryEntry"]
@@ -54,6 +57,15 @@ def add_history_entry(
     }
     with HISTORY_LOCK:
         HISTORY_STORE[:] = [entry, *HISTORY_STORE][:MAX_HISTORY_ITEMS]
+        history_size = len(HISTORY_STORE)
+    logger.info(
+        "history added id=%s operation=%s prompt_chars=%d outputs=%d history_size=%d",
+        entry["id"],
+        operation,
+        len(prompt),
+        len(outputs),
+        history_size,
+    )
     return entry["id"]
 
 
