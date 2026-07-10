@@ -15,8 +15,42 @@ from PIL import Image
 from clients import fal as fal_api
 from clients import nano_gpt as nano_gpt_api
 import history
+import image_utils
 import main
 import workflows
+
+
+class ImageUtilsTests(unittest.TestCase):
+    def test_closest_aspect_ratio_uses_relative_ratio_distance(self):
+        with tempfile.NamedTemporaryFile(suffix=".png") as image_file:
+            Image.new("RGB", (1600, 1000), "red").save(image_file)
+            image_file.flush()
+
+            result = image_utils.closest_aspect_ratio(
+                image_file.name,
+                nano_gpt_api.SEEDREAM_PRO_EDIT_ASPECT_RATIOS,
+            )
+
+        self.assertEqual(result, "3:2")
+
+    def test_prepare_for_aspect_ratio_center_crops_copy(self):
+        with tempfile.NamedTemporaryFile(suffix=".png") as image_file:
+            Image.new("RGB", (1000, 800), "red").save(image_file)
+            image_file.flush()
+
+            prepared_path, aspect_ratio = image_utils.prepare_for_aspect_ratio(
+                image_file.name,
+                nano_gpt_api.SEEDREAM_PRO_EDIT_ASPECT_RATIOS,
+            )
+            try:
+                with Image.open(image_file.name) as original:
+                    self.assertEqual(original.size, (1000, 800))
+                with Image.open(prepared_path) as prepared:
+                    self.assertEqual(prepared.size, (1000, 750))
+            finally:
+                os.remove(prepared_path)
+
+        self.assertEqual(aspect_ratio, "4:3")
 
 
 class NanoGptTests(unittest.TestCase):
@@ -41,7 +75,12 @@ class NanoGptTests(unittest.TestCase):
                     nano_gpt_api,
                     "image_to_data_url",
                     return_value="data:image/png;base64,aW1hZ2U=",
-                ),
+                ) as image_to_data_url,
+                patch.object(
+                    nano_gpt_api,
+                    "prepare_for_aspect_ratio",
+                    return_value=("/tmp/prepared.png", "4:3"),
+                ) as prepare_for_aspect_ratio,
                 patch.object(
                     nano_gpt_api, "urlopen", return_value=response
                 ) as urlopen,
@@ -59,10 +98,16 @@ class NanoGptTests(unittest.TestCase):
         payload = json.loads(request.data)
         self.assertEqual(payload["model"], "bytedance/seedream-v5.0-pro/edit")
         self.assertEqual(payload["n"], 1)
+        self.assertEqual(payload["size"], "4:3")
         self.assertEqual(
             payload["imageDataUrl"], "data:image/png;base64,aW1hZ2U="
         )
         self.assertNotIn("input_references", payload)
+        prepare_for_aspect_ratio.assert_called_once_with(
+            "/tmp/input.png",
+            nano_gpt_api.SEEDREAM_PRO_EDIT_ASPECT_RATIOS,
+        )
+        image_to_data_url.assert_called_once_with("/tmp/prepared.png")
         logs = "\n".join(captured_logs.output)
         self.assertIn("request endpoint=", logs)
         self.assertIn("response endpoint=", logs)

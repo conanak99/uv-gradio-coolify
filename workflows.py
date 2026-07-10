@@ -30,7 +30,9 @@ MODEL_MAP: dict[ModelName, str] = {
     "Qwen Image Edit": "fal-ai/qwen-image-edit-2511",
     "FLUX.2 Klein 9B Edit": "fal-ai/flux-2/klein/9b/edit",
     "Grok Imagine Image Edit": "xai/grok-imagine-image/edit",
-    "Seedream 5.0 Pro Edit (NanoGPT)": "bytedance/seedream-v5.0-pro/edit",
+    "Seedream 5.0 Pro Edit (NanoGPT)": (
+        nano_gpt_client.SEEDREAM_PRO_EDIT_MODEL_ID
+    ),
 }
 NANO_GPT_MODELS = {"Seedream 5.0 Pro Edit (NanoGPT)"}
 
