@@ -1,5 +1,7 @@
 import concurrent.futures
+import logging
 import queue
+import time
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -15,6 +17,8 @@ from history import (
     unchanged_history_view,
 )
 
+
+logger = logging.getLogger(__name__)
 
 type ImageReference = str
 type ModelName = str
@@ -55,6 +59,7 @@ SEEDREAM_LITE_RESOLUTIONS = {
 }
 
 JOB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+JOB_HEARTBEAT_SECONDS = 10.0
 
 
 def run_model(
@@ -105,7 +110,11 @@ def edit_image(
                 result = future.result()
             except Exception as exc:
                 errors.append(f"{model_name}: {exc}")
-                print(f"[edit_image] {model_name} failed: {exc}")
+                logger.warning(
+                    "model response operation=edit model=%s status=error error_type=%s",
+                    model_name,
+                    type(exc).__name__,
+                )
                 continue
             if result:
                 results.append(result)
@@ -189,7 +198,11 @@ def generate_image(
                     progress_callback(list(results))
             except Exception as exc:
                 errors.append(f"{model_name}: {exc}")
-                print(f"[generate_image] {model_name} failed: {exc}")
+                logger.warning(
+                    "model response operation=generate model=%s status=error error_type=%s",
+                    model_name,
+                    type(exc).__name__,
+                )
 
     if not results:
         detail = "; ".join(errors) if errors else "no images returned"
@@ -202,12 +215,20 @@ def generate_image(
 def iter_job_progress(
     future: concurrent.futures.Future[Any],
     progress_queue: queue.Queue[list[GalleryItem]],
-) -> Iterator[list[GalleryItem]]:
+    heartbeat_seconds: float = JOB_HEARTBEAT_SECONDS,
+) -> Iterator[list[GalleryItem] | None]:
+    next_heartbeat = time.monotonic() + heartbeat_seconds
     while not future.done() or not progress_queue.empty():
+        timeout = max(0.0, min(0.1, next_heartbeat - time.monotonic()))
         try:
-            yield progress_queue.get(timeout=0.1)
+            results = progress_queue.get(timeout=timeout)
         except queue.Empty:
+            if time.monotonic() >= next_heartbeat:
+                yield None
+                next_heartbeat = time.monotonic() + heartbeat_seconds
             continue
+        yield results
+        next_heartbeat = time.monotonic() + heartbeat_seconds
 
 
 def run_edit_job(
@@ -216,18 +237,38 @@ def run_edit_job(
     models: list[ModelName],
     progress_queue: queue.Queue[list[GalleryItem]],
 ) -> CompletedJob:
-    results = edit_image(
-        image_path,
-        prompt,
-        models,
-        progress_queue.put,
+    started_at = time.monotonic()
+    logger.info(
+        "job request operation=edit models=%d prompt_chars=%d",
+        len(models),
+        len(prompt),
     )
+    try:
+        results = edit_image(
+            image_path,
+            prompt,
+            models,
+            progress_queue.put,
+        )
+    except Exception as exc:
+        logger.error(
+            "job response operation=edit status=error duration_ms=%d error_type=%s",
+            int((time.monotonic() - started_at) * 1000),
+            type(exc).__name__,
+        )
+        raise
     entry_id = add_history_entry(
         operation="Edit",
         prompt=prompt,
         input_image=image_path,
         outputs=results,
         settings=f'Models: {", ".join(models)}',
+    )
+    logger.info(
+        "job response operation=edit status=success duration_ms=%d images=%d history_id=%s",
+        int((time.monotonic() - started_at) * 1000),
+        len(results),
+        entry_id,
     )
     return entry_id, results
 
@@ -252,7 +293,7 @@ def edit_image_flow(
     )
     for partial_results in iter_job_progress(future, progress_queue):
         yield (
-            partial_results,
+            partial_results if partial_results is not None else gr.update(),
             gr.update(interactive=False, value="Editing..."),
             *unchanged_history_view(),
         )
@@ -279,13 +320,29 @@ def run_generate_job(
     num_images: int,
     progress_queue: queue.Queue[list[GalleryItem]],
 ) -> CompletedJob:
-    results = generate_image(
-        prompt,
-        models,
-        aspect_ratio,
+    started_at = time.monotonic()
+    logger.info(
+        "job request operation=generate models=%d prompt_chars=%d outputs_per_model=%d aspect_ratio=%s",
+        len(models),
+        len(prompt),
         num_images,
-        progress_queue.put,
+        aspect_ratio,
     )
+    try:
+        results = generate_image(
+            prompt,
+            models,
+            aspect_ratio,
+            num_images,
+            progress_queue.put,
+        )
+    except Exception as exc:
+        logger.error(
+            "job response operation=generate status=error duration_ms=%d error_type=%s",
+            int((time.monotonic() - started_at) * 1000),
+            type(exc).__name__,
+        )
+        raise
     entry_id = add_history_entry(
         operation="Generate",
         prompt=prompt,
@@ -295,6 +352,12 @@ def run_generate_job(
             f'Models: {", ".join(models)} · Aspect ratio: {aspect_ratio} · '
             f"Images: {num_images}"
         ),
+    )
+    logger.info(
+        "job response operation=generate status=success duration_ms=%d images=%d history_id=%s",
+        int((time.monotonic() - started_at) * 1000),
+        len(results),
+        entry_id,
     )
     return entry_id, results
 
@@ -321,7 +384,7 @@ def generate_image_flow(
     )
     for partial_results in iter_job_progress(future, progress_queue):
         yield (
-            partial_results,
+            partial_results if partial_results is not None else gr.update(),
             gr.update(interactive=False, value="Generating..."),
             *unchanged_history_view(),
         )

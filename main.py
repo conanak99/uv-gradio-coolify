@@ -1,3 +1,4 @@
+import logging
 import os
 
 from dotenv import load_dotenv
@@ -15,9 +16,25 @@ from workflows import (
 
 load_dotenv()
 
+log_level = getattr(
+    logging,
+    os.environ.get("LOG_LEVEL", "INFO").upper(),
+    logging.INFO,
+)
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+for logger_name in ("clients.fal", "clients.nano_gpt", "history", "workflows"):
+    logging.getLogger(logger_name).setLevel(log_level)
+
 PROMPT_CSS = """
 .prompt-input textarea,
 .prompt-input input {
+    font-size: 16px !important;
+}
+.history-select input,
+.history-select select {
     font-size: 16px !important;
 }
 """
@@ -92,6 +109,7 @@ with gr.Blocks(title="Image Studio") as demo:
                     choices=[],
                     label="Latest 10 requests",
                     interactive=True,
+                    elem_classes=["history-select"],
                 )
                 history_refresh = gr.Button("Refresh")
 
