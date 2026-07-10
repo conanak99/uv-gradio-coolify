@@ -1,9 +1,15 @@
 import math
+import os
+import tempfile
+from io import BytesIO
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from PIL import Image
 
 
 MAX_DIMENSION = 2048
+MAX_REMOTE_IMAGE_BYTES = 25 * 1024 * 1024
 
 
 def aspect_ratio_value(aspect_ratio: str) -> float:
@@ -74,3 +80,48 @@ def resize_if_needed(image_path: str) -> str:
     finally:
         resized_image.close()
     return resized_path
+
+
+def _image_suffix(image_format: str | None) -> str:
+    return {
+        "JPEG": ".jpg",
+        "PNG": ".png",
+        "WEBP": ".webp",
+        "GIF": ".gif",
+    }.get(image_format or "", ".img")
+
+
+def download_image_url(image_url: str) -> str:
+    request = Request(
+        image_url,
+        headers={"User-Agent": "Image Studio/1.0"},
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            image_bytes = response.read(MAX_REMOTE_IMAGE_BYTES + 1)
+    except HTTPError as exc:
+        raise RuntimeError(
+            f"Could not download input image URL ({exc.code})."
+        ) from exc
+    except URLError as exc:
+        raise RuntimeError(
+            f"Could not download input image URL: {exc.reason}."
+        ) from exc
+
+    if len(image_bytes) > MAX_REMOTE_IMAGE_BYTES:
+        raise RuntimeError("Input image URL is larger than the download limit.")
+
+    try:
+        with Image.open(BytesIO(image_bytes)) as image:
+            image_format = image.format
+            image.verify()
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Input image URL did not return a valid image.") from exc
+
+    file_descriptor, image_path = tempfile.mkstemp(
+        prefix="image-studio-url-",
+        suffix=_image_suffix(image_format),
+    )
+    with os.fdopen(file_descriptor, "wb") as image_file:
+        image_file.write(image_bytes)
+    return image_path
