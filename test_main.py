@@ -12,7 +12,8 @@ from PIL import Image
 
 from clients import fal as fal_api
 from clients import nano_gpt as nano_gpt_api
-import main
+import history
+import workflows
 
 
 class NanoGptTests(unittest.TestCase):
@@ -133,11 +134,11 @@ class FalClientTests(unittest.TestCase):
 class ProviderRoutingTests(unittest.TestCase):
     def test_seedream_routes_to_nano_gpt_client(self):
         with patch.object(
-            main.nano_gpt_client,
+            workflows.nano_gpt_client,
             "edit_image",
             return_value="https://image.test/nano.png",
         ) as edit_image:
-            result = main.run_model(
+            result = workflows.run_model(
                 "Seedream 5.0 Pro Edit (NanoGPT)",
                 "/tmp/input.png",
                 "Improve the lighting",
@@ -159,25 +160,25 @@ class ProviderRoutingTests(unittest.TestCase):
     def test_seedream_generate_models_route_to_nano_gpt(self):
         cases = [
             (
-                main.SEEDREAM_LITE_GENERATE_MODEL,
+                workflows.SEEDREAM_LITE_GENERATE_MODEL,
                 "16:9",
                 "seedream-v5.0-lite",
                 "2560x1440",
             ),
             (
-                main.SEEDREAM_PRO_GENERATE_MODEL,
+                workflows.SEEDREAM_PRO_GENERATE_MODEL,
                 "3:4",
                 "bytedance/seedream-v5.0-pro",
                 "3:4",
             ),
             (
-                main.SEEDREAM_LITE_GENERATE_MODEL,
+                workflows.SEEDREAM_LITE_GENERATE_MODEL,
                 "4:3",
                 "seedream-v5.0-lite",
                 "3072x2048",
             ),
             (
-                main.SEEDREAM_LITE_GENERATE_MODEL,
+                workflows.SEEDREAM_LITE_GENERATE_MODEL,
                 "3:4",
                 "seedream-v5.0-lite",
                 "2048x3072",
@@ -188,12 +189,12 @@ class ProviderRoutingTests(unittest.TestCase):
             with (
                 self.subTest(model=model_name),
                 patch.object(
-                    main.nano_gpt_client,
+                    workflows.nano_gpt_client,
                     "generate_images",
                     return_value=["https://image.test/generated.png"],
                 ) as generate_images,
             ):
-                result = main.run_generate_model(
+                result = workflows.run_generate_model(
                     "A lighthouse",
                     model_name,
                     ratio,
@@ -204,7 +205,7 @@ class ProviderRoutingTests(unittest.TestCase):
                     "4:3": "4:3 → 3:2",
                     "3:4": (
                         "3:4 → 2:3"
-                        if model_name == main.SEEDREAM_LITE_GENERATE_MODEL
+                        if model_name == workflows.SEEDREAM_LITE_GENERATE_MODEL
                         else "3:4"
                     ),
                 }.get(ratio, ratio)
@@ -226,13 +227,13 @@ class ProviderRoutingTests(unittest.TestCase):
 
     def test_grok_generation_still_routes_to_fal(self):
         with patch.object(
-            main.fal_client,
+            workflows.fal_client,
             "generate_images",
             return_value=["https://image.test/grok.png"],
         ) as generate_images:
-            result = main.run_generate_model(
+            result = workflows.run_generate_model(
                 "A lighthouse",
-                main.GROK_GENERATE_MODEL,
+                workflows.GROK_GENERATE_MODEL,
                 "4:3",
                 1,
             )
@@ -242,7 +243,7 @@ class ProviderRoutingTests(unittest.TestCase):
             [
                 (
                     "https://image.test/grok.png",
-                    f"{main.GROK_GENERATE_MODEL} (4:3)",
+                    f"{workflows.GROK_GENERATE_MODEL} (4:3)",
                 )
             ],
         )
@@ -250,21 +251,21 @@ class ProviderRoutingTests(unittest.TestCase):
 
     def test_generate_image_runs_all_selected_models(self):
         models = [
-            main.GROK_GENERATE_MODEL,
-            main.SEEDREAM_LITE_GENERATE_MODEL,
-            main.SEEDREAM_PRO_GENERATE_MODEL,
+            workflows.GROK_GENERATE_MODEL,
+            workflows.SEEDREAM_LITE_GENERATE_MODEL,
+            workflows.SEEDREAM_PRO_GENERATE_MODEL,
         ]
 
         def result_for_model(_prompt, model_name, ratio, _count):
             return [(f"https://image.test/{model_name}.png", f"{model_name} ({ratio})")]
 
         with patch.object(
-            main,
+            workflows,
             "run_generate_model",
             side_effect=result_for_model,
         ) as run_generate_model:
             progress_updates = []
-            results = main.generate_image(
+            results = workflows.generate_image(
                 "A lighthouse",
                 models,
                 "1:1",
@@ -293,14 +294,14 @@ class ProviderRoutingTests(unittest.TestCase):
 
         with (
             patch.object(
-                main.fal_client,
+                workflows.fal_client,
                 "upload_image",
                 return_value="https://image.test/input.png",
             ),
-            patch.object(main, "run_model", side_effect=edit_result),
+            patch.object(workflows, "run_model", side_effect=edit_result),
         ):
             progress_updates = []
-            results = main.edit_image(
+            results = workflows.edit_image(
                 "/tmp/input.png",
                 "Improve the lighting",
                 models,
@@ -316,12 +317,12 @@ class ProviderRoutingTests(unittest.TestCase):
 
 class HistoryTests(unittest.TestCase):
     def setUp(self):
-        with main.HISTORY_LOCK:
-            main.HISTORY_STORE.clear()
+        with history.HISTORY_LOCK:
+            history.HISTORY_STORE.clear()
 
     def test_history_keeps_latest_ten_entries(self):
         for index in range(11):
-            main.add_history_entry(
+            history.add_history_entry(
                 operation="Generate",
                 prompt=f"Prompt {index}",
                 input_image=None,
@@ -329,24 +330,24 @@ class HistoryTests(unittest.TestCase):
                 settings="Aspect ratio: 1:1 · Images: 1",
             )
 
-        history = main.get_history()
-        self.assertEqual(len(history), 10)
-        self.assertEqual(history[0]["prompt"], "Prompt 10")
-        self.assertEqual(history[-1]["prompt"], "Prompt 1")
+        entries = history.get_history()
+        self.assertEqual(len(entries), 10)
+        self.assertEqual(entries[0]["prompt"], "Prompt 10")
+        self.assertEqual(entries[-1]["prompt"], "Prompt 1")
 
     def test_history_entry_view_returns_selected_input_and_outputs(self):
         outputs = [("https://image.test/edited.png", "Edit Model")]
-        entry_id = main.add_history_entry(
+        entry_id = history.add_history_entry(
             operation="Edit",
             prompt="Make it brighter",
             input_image="/tmp/input.png",
             outputs=outputs,
             settings="Models: Edit Model",
         )
-        history = main.get_history()
+        entries = history.get_history()
 
-        details, prompt, input_html, outputs_html = main.history_entry_view(
-            history, entry_id
+        details, prompt, input_html, outputs_html = history.history_entry_view(
+            entries, entry_id
         )
 
         self.assertIn("Edit", details)
@@ -356,7 +357,7 @@ class HistoryTests(unittest.TestCase):
         self.assertIn("Edit Model", outputs_html)
 
     def test_refresh_exposes_shared_history(self):
-        entry_id = main.add_history_entry(
+        entry_id = history.add_history_entry(
             operation="Generate",
             prompt="Visible on every device",
             input_image=None,
@@ -364,7 +365,7 @@ class HistoryTests(unittest.TestCase):
             settings="Model: Shared",
         )
 
-        selector, details, prompt, input_html, outputs_html = main.refresh_history()
+        selector, details, prompt, input_html, outputs_html = history.refresh_history()
 
         self.assertEqual(selector["value"], entry_id)
         self.assertEqual(prompt, "Visible on every device")
@@ -373,7 +374,7 @@ class HistoryTests(unittest.TestCase):
         self.assertIn("Shared", outputs_html)
 
     def test_history_html_handles_data_urls_without_gradio_file_processing(self):
-        outputs_html = main.history_outputs_html(
+        outputs_html = history.history_outputs_html(
             [("data:image/png;base64,dHdv", "Inline image")]
         )
 
@@ -382,13 +383,13 @@ class HistoryTests(unittest.TestCase):
 
     def test_failed_job_is_not_added_to_history(self):
         with patch.object(
-            main,
+            workflows,
             "generate_image",
             side_effect=RuntimeError("provider failed"),
         ):
-            flow = main.generate_image_flow(
+            flow = workflows.generate_image_flow(
                 "This will fail",
-                [main.SEEDREAM_PRO_GENERATE_MODEL],
+                [workflows.SEEDREAM_PRO_GENERATE_MODEL],
                 "1:1",
                 "1",
             )
@@ -396,25 +397,25 @@ class HistoryTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "provider failed"):
                 list(flow)
 
-        self.assertEqual(main.get_history(), [])
+        self.assertEqual(history.get_history(), [])
 
     def test_generate_flow_adds_successful_request_to_history(self):
         outputs = [
             (
                 "https://image.test/generated.png",
-                f"{main.SEEDREAM_LITE_GENERATE_MODEL} (1:1)",
+                f"{workflows.SEEDREAM_LITE_GENERATE_MODEL} (1:1)",
             )
         ]
 
         with patch.object(
-            main, "generate_image", return_value=outputs
+            workflows, "generate_image", return_value=outputs
         ) as generate_image:
             updates = list(
-                main.generate_image_flow(
+                workflows.generate_image_flow(
                     "A lighthouse",
                     [
-                        main.SEEDREAM_LITE_GENERATE_MODEL,
-                        main.SEEDREAM_PRO_GENERATE_MODEL,
+                        workflows.SEEDREAM_LITE_GENERATE_MODEL,
+                        workflows.SEEDREAM_PRO_GENERATE_MODEL,
                     ],
                     "1:1",
                     "1",
@@ -425,16 +426,16 @@ class HistoryTests(unittest.TestCase):
         final_update = updates[-1]
         self.assertEqual(len(final_update), 7)
         self.assertEqual(final_update[0], outputs)
-        history = main.get_history()
-        self.assertEqual(history[0]["operation"], "Generate")
-        self.assertEqual(history[0]["prompt"], "A lighthouse")
+        entries = history.get_history()
+        self.assertEqual(entries[0]["operation"], "Generate")
+        self.assertEqual(entries[0]["prompt"], "A lighthouse")
         self.assertIn(
-            main.SEEDREAM_LITE_GENERATE_MODEL,
-            history[0]["settings"],
+            workflows.SEEDREAM_LITE_GENERATE_MODEL,
+            entries[0]["settings"],
         )
         self.assertIn(
-            main.SEEDREAM_PRO_GENERATE_MODEL,
-            history[0]["settings"],
+            workflows.SEEDREAM_PRO_GENERATE_MODEL,
+            entries[0]["settings"],
         )
         self.assertEqual(final_update[4], "A lighthouse")
         self.assertIn("No input image", final_update[5])
@@ -442,8 +443,8 @@ class HistoryTests(unittest.TestCase):
         generate_image.assert_called_once_with(
             "A lighthouse",
             [
-                main.SEEDREAM_LITE_GENERATE_MODEL,
-                main.SEEDREAM_PRO_GENERATE_MODEL,
+                workflows.SEEDREAM_LITE_GENERATE_MODEL,
+                workflows.SEEDREAM_PRO_GENERATE_MODEL,
             ],
             "1:1",
             1,
@@ -467,15 +468,15 @@ class HistoryTests(unittest.TestCase):
             return all_results
 
         with patch.object(
-            main,
+            workflows,
             "generate_image",
             side_effect=staged_generation,
         ):
-            flow = main.generate_image_flow(
+            flow = workflows.generate_image_flow(
                 "Stream a lighthouse",
                 [
-                    main.GROK_GENERATE_MODEL,
-                    main.SEEDREAM_PRO_GENERATE_MODEL,
+                    workflows.GROK_GENERATE_MODEL,
+                    workflows.SEEDREAM_PRO_GENERATE_MODEL,
                 ],
                 "1:1",
                 "1",
@@ -484,14 +485,14 @@ class HistoryTests(unittest.TestCase):
             partial_update = next(flow)
 
             self.assertEqual(partial_update[0], first_result)
-            self.assertEqual(main.get_history(), [])
+            self.assertEqual(history.get_history(), [])
 
             release_second_result.set()
             remaining_updates = list(flow)
 
         self.assertEqual(remaining_updates[0][0], all_results)
         self.assertEqual(remaining_updates[-1][0], all_results)
-        completed_history = main.get_history()[0]
+        completed_history = history.get_history()[0]
         self.assertEqual(completed_history["outputs"], all_results)
 
     def test_edit_flow_streams_before_storing_complete_history(self):
@@ -508,8 +509,8 @@ class HistoryTests(unittest.TestCase):
             progress_callback(all_results)
             return all_results
 
-        with patch.object(main, "edit_image", side_effect=staged_edit):
-            flow = main.edit_image_flow(
+        with patch.object(workflows, "edit_image", side_effect=staged_edit):
+            flow = workflows.edit_image_flow(
                 "/tmp/input.png",
                 "Stream an edit",
                 ["First Edit", "Second Edit"],
@@ -518,14 +519,14 @@ class HistoryTests(unittest.TestCase):
             partial_update = next(flow)
 
             self.assertEqual(partial_update[0], first_result)
-            self.assertEqual(main.get_history(), [])
+            self.assertEqual(history.get_history(), [])
 
             release_second_result.set()
             remaining_updates = list(flow)
 
         self.assertEqual(remaining_updates[0][0], all_results)
         self.assertEqual(remaining_updates[-1][0], all_results)
-        completed_history = main.get_history()[0]
+        completed_history = history.get_history()[0]
         self.assertEqual(completed_history["outputs"], all_results)
 
     def test_generation_completes_in_memory_after_client_disconnect(self):
@@ -533,7 +534,7 @@ class HistoryTests(unittest.TestCase):
         outputs = [
             (
                 "https://image.test/disconnected.png",
-                f"{main.SEEDREAM_PRO_GENERATE_MODEL} (1:1)",
+                f"{workflows.SEEDREAM_PRO_GENERATE_MODEL} (1:1)",
             )
         ]
 
@@ -541,29 +542,29 @@ class HistoryTests(unittest.TestCase):
             release_generation.wait(timeout=2)
             return outputs
 
-        with patch.object(main, "generate_image", side_effect=delayed_generation):
-            flow = main.generate_image_flow(
+        with patch.object(workflows, "generate_image", side_effect=delayed_generation):
+            flow = workflows.generate_image_flow(
                 "A lighthouse after disconnect",
-                [main.SEEDREAM_PRO_GENERATE_MODEL],
+                [workflows.SEEDREAM_PRO_GENERATE_MODEL],
                 "1:1",
                 "1",
             )
             next(flow)
-            self.assertEqual(main.get_history(), [])
+            self.assertEqual(history.get_history(), [])
 
             flow.close()
             release_generation.set()
 
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
-                history = main.get_history()
-                if history:
+                entries = history.get_history()
+                if entries:
                     break
                 time.sleep(0.01)
             else:
                 self.fail("Background generation did not complete after disconnect")
 
-        self.assertEqual(history[0]["outputs"], outputs)
+        self.assertEqual(entries[0]["outputs"], outputs)
 
 
 if __name__ == "__main__":
