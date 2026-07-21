@@ -1019,6 +1019,22 @@ class UiConfigTests(unittest.TestCase):
         self.assertIn(".history-select input", main.PROMPT_CSS)
         self.assertIn(".image-url-input input", main.PROMPT_CSS)
 
+    def test_job_events_allow_concurrent_runs(self):
+        job_limits = {
+            event.name: event.concurrency_limit
+            for event in main.demo.fns.values()
+            if event.name in ("edit_image_flow", "generate_image_flow")
+        }
+
+        self.assertEqual(
+            job_limits,
+            {
+                "edit_image_flow": main.JOB_CONCURRENCY_LIMIT,
+                "generate_image_flow": main.JOB_CONCURRENCY_LIMIT,
+            },
+        )
+        self.assertGreaterEqual(main.JOB_CONCURRENCY_LIMIT, 3)
+
     def test_launch_allows_nano_output_cache(self):
         with patch.object(main.demo, "launch") as launch:
             main.launch_app(7860)
