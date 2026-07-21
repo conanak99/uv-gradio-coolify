@@ -265,6 +265,12 @@ class NanoGptTests(unittest.TestCase):
         self.assertTrue(results[1].endswith(".png"))
         with open(results[1], "rb") as generated_file:
             self.assertEqual(generated_file.read(), generated_bytes)
+        # The cache filename becomes the browser download name; keep it short.
+        cached_name = os.path.basename(results[1])
+        self.assertEqual(
+            len(cached_name),
+            nano_gpt_api.OUTPUT_NAME_DIGEST_CHARS + len(".png"),
+        )
         payload = json.loads(urlopen.call_args.args[0].data)
         self.assertEqual(
             urlopen.call_args.args[0].full_url,
