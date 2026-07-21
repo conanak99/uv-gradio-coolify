@@ -18,7 +18,7 @@ DEFAULT_EDIT_MODELS = list(EDIT_MODELS)
 DEFAULT_GENERATE_MODELS = list(GENERATE_MODELS)
 # Gradio defaults to 1 concurrent run per event, which queues requests from
 # other tabs/users behind the active one. Allow a few jobs in parallel.
-JOB_CONCURRENCY_LIMIT = 3
+JOB_CONCURRENCY_LIMIT = 5
 BROWSER_STATE_SECRET = os.environ.get(
     "BROWSER_STATE_SECRET",
     "image-studio-browser-state-v1",

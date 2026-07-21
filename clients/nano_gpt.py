@@ -35,6 +35,9 @@ JPEG_MAX_QUALITY = 95
 OUTPUT_CACHE = tempfile.TemporaryDirectory(prefix="image-studio-nanogpt-")
 OUTPUT_CACHE_PATH = Path(OUTPUT_CACHE.name)
 OUTPUT_CACHE_LOCK = threading.Lock()
+# The cache filename doubles as the browser download name, so keep it short.
+# 16 hex chars (64 bits) is still collision-safe for a per-process cache.
+OUTPUT_NAME_DIGEST_CHARS = 16
 
 
 def _jpeg_compatible_image(image_path: str) -> Image.Image:
@@ -160,7 +163,7 @@ def _cache_base64_image(image_base64: str) -> str:
         "PNG": ".png",
         "WEBP": ".webp",
     }.get(image_format or "", ".img")
-    digest = hashlib.sha256(image_bytes).hexdigest()
+    digest = hashlib.sha256(image_bytes).hexdigest()[:OUTPUT_NAME_DIGEST_CHARS]
     image_path = OUTPUT_CACHE_PATH / f"{digest}{suffix}"
     with OUTPUT_CACHE_LOCK:
         if not image_path.exists():
