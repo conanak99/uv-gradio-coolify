@@ -16,6 +16,9 @@ load_dotenv()
 
 DEFAULT_EDIT_MODELS = list(EDIT_MODELS)
 DEFAULT_GENERATE_MODELS = list(GENERATE_MODELS)
+# Gradio defaults to 1 concurrent run per event, which queues requests from
+# other tabs/users behind the active one. Allow a few jobs in parallel.
+JOB_CONCURRENCY_LIMIT = 5
 BROWSER_STATE_SECRET = os.environ.get(
     "BROWSER_STATE_SECRET",
     "image-studio-browser-state-v1",
@@ -232,6 +235,7 @@ with gr.Blocks(title="Image Studio") as demo:
         fn=edit_image_flow,
         inputs=[input_image, input_image_url, edit_prompt, models],
         outputs=[edit_gallery, edit_btn, *history_outputs],
+        concurrency_limit=JOB_CONCURRENCY_LIMIT,
     )
     for url_event in (input_image_url.change, input_image_url.submit):
         url_event(
@@ -259,6 +263,7 @@ with gr.Blocks(title="Image Studio") as demo:
         fn=generate_image_flow,
         inputs=[gen_prompt, gen_models, gen_ratio, gen_num],
         outputs=[gen_gallery, gen_btn, *history_outputs],
+        concurrency_limit=JOB_CONCURRENCY_LIMIT,
     )
     gen_models.change(
         fn=save_generate_model_preference,

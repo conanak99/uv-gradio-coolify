@@ -42,7 +42,9 @@ type ModelName = str
 type ProgressCallback = Callable[[list[GalleryItem]], None]
 type CompletedJob = tuple[str, list[GalleryItem]]
 
-JOB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+# Sized for the UI's concurrency limit (5 concurrent edit + 5 generate jobs);
+# each job occupies one worker while its model fan-out runs.
+JOB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 JOB_HEARTBEAT_SECONDS = 1.0
 
 
