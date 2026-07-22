@@ -99,9 +99,9 @@ EDIT_MODELS = _by_name(
         # No crop ratios: NanoGPT defaults this model's resolution to "auto",
         # which matches the input image ratio (same behavior as WAN edit).
         EditModel(
-            "Qwen Image Max Edit (NanoGPT)",
+            "P-Image Edit (NanoGPT)",
             Provider.NANO_GPT,
-            "qwen-image-max-edit",
+            "pruna-ai/p-image/edit",
         ),
     ]
 )
