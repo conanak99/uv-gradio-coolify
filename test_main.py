@@ -29,6 +29,7 @@ WAN_27_GENERATE = "WAN 2.7 Image (NanoGPT)"
 WAN_27_PRO_GENERATE = "WAN 2.7 Image Pro (NanoGPT)"
 SEEDREAM_PRO_EDIT = "Seedream 5.0 Pro Edit (NanoGPT)"
 WAN_26_EDIT = "WAN 2.6 Image Edit (NanoGPT)"
+QWEN_MAX_EDIT = "Qwen Image Max Edit (NanoGPT)"
 
 
 class ImageUtilsTests(unittest.TestCase):
@@ -182,38 +183,47 @@ class NanoGptTests(unittest.TestCase):
         self.assertNotIn("aW1hZ2U=", logs)
         self.assertNotIn("Improve the lighting", logs)
 
-    def test_wan_edit_model_uses_json_edit_without_seedream_size(self):
-        response = io.BytesIO(
-            json.dumps({"data": [{"url": "https://image.test/wan.png"}]}).encode()
-        )
-
-        with (
-            patch.dict(os.environ, {"NANO_GPT_KEY": "test-key"}),
-            patch.object(
-                nano_gpt_api,
-                "image_to_data_url",
-                return_value="data:image/jpeg;base64,aW1hZ2U=",
-            ) as image_to_data_url,
-            patch.object(nano_gpt_api, "prepare_for_aspect_ratio") as prepare,
-            patch.object(nano_gpt_api, "urlopen", return_value=response) as urlopen,
-        ):
-            result = nano_gpt_api.edit_image(
-                models.EDIT_MODELS[WAN_26_EDIT].model_id,
-                "/tmp/input.png",
-                "Change the jacket color",
+    def test_auto_ratio_edit_models_send_no_size_so_output_matches_input(self):
+        for model_name in (WAN_26_EDIT, QWEN_MAX_EDIT):
+            model = models.EDIT_MODELS[model_name]
+            response = io.BytesIO(
+                json.dumps(
+                    {"data": [{"url": "https://image.test/edited.png"}]}
+                ).encode()
             )
 
-        self.assertEqual(result, "https://image.test/wan.png")
-        payload = json.loads(urlopen.call_args.args[0].data)
-        self.assertEqual(payload["model"], models.EDIT_MODELS[WAN_26_EDIT].model_id)
-        self.assertEqual(payload["n"], 1)
-        self.assertEqual(
-            payload["imageDataUrl"], "data:image/jpeg;base64,aW1hZ2U="
-        )
-        self.assertNotIn("size", payload)
-        self.assertNotIn("resolution", payload)
-        prepare.assert_not_called()
-        image_to_data_url.assert_called_once_with("/tmp/input.png")
+            with (
+                self.subTest(model=model_name),
+                patch.dict(os.environ, {"NANO_GPT_KEY": "test-key"}),
+                patch.object(
+                    nano_gpt_api,
+                    "image_to_data_url",
+                    return_value="data:image/jpeg;base64,aW1hZ2U=",
+                ) as image_to_data_url,
+                patch.object(nano_gpt_api, "prepare_for_aspect_ratio") as prepare,
+                patch.object(
+                    nano_gpt_api, "urlopen", return_value=response
+                ) as urlopen,
+            ):
+                self.assertEqual(model.crop_aspect_ratios, ())
+                result = nano_gpt_api.edit_image(
+                    model.model_id,
+                    "/tmp/input.png",
+                    "Change the jacket color",
+                    crop_aspect_ratios=model.crop_aspect_ratios,
+                )
+
+                self.assertEqual(result, "https://image.test/edited.png")
+                payload = json.loads(urlopen.call_args.args[0].data)
+                self.assertEqual(payload["model"], model.model_id)
+                self.assertEqual(payload["n"], 1)
+                self.assertEqual(
+                    payload["imageDataUrl"], "data:image/jpeg;base64,aW1hZ2U="
+                )
+                self.assertNotIn("size", payload)
+                self.assertNotIn("resolution", payload)
+                prepare.assert_not_called()
+                image_to_data_url.assert_called_once_with("/tmp/input.png")
 
     def test_run_nano_gpt_model_requires_key(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -371,7 +381,7 @@ class ProviderRoutingTests(unittest.TestCase):
             )
 
     def test_nano_gpt_edit_models_route_to_nano_gpt_client(self):
-        for model_name in (SEEDREAM_PRO_EDIT, WAN_26_EDIT):
+        for model_name in (SEEDREAM_PRO_EDIT, WAN_26_EDIT, QWEN_MAX_EDIT):
             model = models.EDIT_MODELS[model_name]
             with (
                 self.subTest(model=model_name),
