@@ -29,7 +29,7 @@ WAN_27_GENERATE = "WAN 2.7 Image (NanoGPT)"
 WAN_27_PRO_GENERATE = "WAN 2.7 Image Pro (NanoGPT)"
 SEEDREAM_PRO_EDIT = "Seedream 5.0 Pro Edit (NanoGPT)"
 WAN_26_EDIT = "WAN 2.6 Image Edit (NanoGPT)"
-QWEN_MAX_EDIT = "Qwen Image Max Edit (NanoGPT)"
+P_IMAGE_EDIT = "P-Image Edit (NanoGPT)"
 
 
 class ImageUtilsTests(unittest.TestCase):
@@ -184,7 +184,7 @@ class NanoGptTests(unittest.TestCase):
         self.assertNotIn("Improve the lighting", logs)
 
     def test_auto_ratio_edit_models_send_no_size_so_output_matches_input(self):
-        for model_name in (WAN_26_EDIT, QWEN_MAX_EDIT):
+        for model_name in (WAN_26_EDIT, P_IMAGE_EDIT):
             model = models.EDIT_MODELS[model_name]
             response = io.BytesIO(
                 json.dumps(
@@ -381,7 +381,7 @@ class ProviderRoutingTests(unittest.TestCase):
             )
 
     def test_nano_gpt_edit_models_route_to_nano_gpt_client(self):
-        for model_name in (SEEDREAM_PRO_EDIT, WAN_26_EDIT, QWEN_MAX_EDIT):
+        for model_name in (SEEDREAM_PRO_EDIT, WAN_26_EDIT, P_IMAGE_EDIT):
             model = models.EDIT_MODELS[model_name]
             with (
                 self.subTest(model=model_name),
