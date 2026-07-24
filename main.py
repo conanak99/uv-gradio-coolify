@@ -9,7 +9,7 @@ from clients.nano_gpt import OUTPUT_CACHE_PATH
 from history import refresh_history, stored_history_entry_view
 from image_utils import is_http_url
 from models import EDIT_MODELS, GENERATE_ASPECT_RATIOS, GENERATE_MODELS
-from workflows import edit_image_flow, generate_image_flow
+from workflows import MAX_EDIT_BATCH_SIZE, edit_image_flow, generate_image_flow
 
 
 load_dotenv()
@@ -135,9 +135,13 @@ with gr.Blocks(title="Image Studio") as demo:
                 with gr.Column():
                     with gr.Row():
                         with gr.Column(scale=2):
-                            input_image = gr.Image(
+                            input_images = gr.Gallery(
                                 type="filepath",
-                                label="Input Image",
+                                label=f"Input Images (max {MAX_EDIT_BATCH_SIZE} per batch)",
+                                file_types=["image"],
+                                interactive=True,
+                                columns=2,
+                                object_fit="contain",
                                 height="50vh",
                             )
                         with gr.Column(scale=1):
@@ -233,7 +237,7 @@ with gr.Blocks(title="Image Studio") as demo:
     history_outputs = [history_selector, *history_detail_outputs]
     edit_btn.click(
         fn=edit_image_flow,
-        inputs=[input_image, input_image_url, edit_prompt, models],
+        inputs=[input_images, input_image_url, edit_prompt, models],
         outputs=[edit_gallery, edit_btn, *history_outputs],
         concurrency_limit=JOB_CONCURRENCY_LIMIT,
     )

@@ -578,7 +578,7 @@ class ProviderRoutingTests(unittest.TestCase):
             ) as run_edit_model,
         ):
             result = workflows.edit_image(
-                "/tmp/uploaded.png",
+                None,
                 "Improve the lighting",
                 [model_name],
                 image_url=" https://image.test/input.png ",
@@ -595,6 +595,82 @@ class ProviderRoutingTests(unittest.TestCase):
             models.EDIT_MODELS[model_name],
             "https://image.test/input.png",
             "Improve the lighting",
+        )
+
+    def test_select_edit_image_inputs_combines_gallery_and_url(self):
+        image_references = workflows.select_edit_image_inputs(
+            [("/tmp/first.png", None), "/tmp/second.png"],
+            image_url=" https://image.test/third.png ",
+        )
+
+        self.assertEqual(
+            image_references,
+            [
+                "/tmp/first.png",
+                "/tmp/second.png",
+                "https://image.test/third.png",
+            ],
+        )
+
+    def test_select_edit_image_inputs_rejects_oversized_batch(self):
+        images = [f"/tmp/input-{index}.png" for index in range(6)]
+
+        with self.assertRaisesRegex(Exception, "at most 5 images per batch"):
+            workflows.select_edit_image_inputs(images)
+
+        self.assertEqual(workflows.MAX_EDIT_BATCH_SIZE, 5)
+        self.assertEqual(
+            len(workflows.select_edit_image_inputs(images[:5])),
+            5,
+        )
+
+    def test_edit_image_batch_runs_each_image_across_models(self):
+        model_name = "Qwen Image Edit"
+
+        def edit_result(model, image_reference, _prompt):
+            return [(f"https://image.test/{image_reference}.png", model.name)]
+
+        with (
+            patch.object(
+                workflows.fal_client,
+                "upload_image",
+                side_effect=lambda path: f"https://upload.test/{os.path.basename(path)}",
+            ) as upload_image,
+            patch.object(
+                workflows, "run_edit_model", side_effect=edit_result
+            ) as run_edit_model,
+        ):
+            progress_updates = []
+            results = workflows.edit_image(
+                [("/tmp/first.png", None), ("/tmp/second.png", None)],
+                "Improve the lighting",
+                [model_name],
+                progress_updates.append,
+                image_url="https://image.test/third.png",
+            )
+
+        self.assertEqual(len(results), 3)
+        captions = sorted(caption for _url, caption in results)
+        for image_number, caption in enumerate(captions, start=1):
+            self.assertRegex(
+                caption,
+                rf"^{re.escape(model_name)} · Image {image_number} · \d+\.\ds$",
+            )
+        self.assertEqual(
+            [len(update) for update in progress_updates],
+            [1, 2, 3],
+        )
+        self.assertEqual(upload_image.call_count, 2)
+        edited_references = sorted(
+            call.args[1] for call in run_edit_model.call_args_list
+        )
+        self.assertEqual(
+            edited_references,
+            [
+                "https://image.test/third.png",
+                "https://upload.test/first.png",
+                "https://upload.test/second.png",
+            ],
         )
 
     def test_edit_image_downloads_remote_url_for_nano_gpt(self):
@@ -910,6 +986,55 @@ class HistoryTests(unittest.TestCase):
         self.assertIn("https://image.test/input.png", updates[-1][5])
         self.assertIn("https://image.test/edited.png", updates[-1][6])
 
+    def test_edit_flow_batch_stores_all_inputs_in_history(self):
+        outputs = [
+            ("https://image.test/edited-1.png", "Qwen Image Edit · Image 1"),
+            ("https://image.test/edited-2.png", "Qwen Image Edit · Image 2"),
+        ]
+
+        with patch.object(workflows, "edit_image", return_value=outputs):
+            updates = list(
+                workflows.edit_image_flow(
+                    [("/tmp/first.png", None), ("/tmp/second.png", None)],
+                    None,
+                    "Batch edit",
+                    ["Qwen Image Edit"],
+                )
+            )
+
+        entries = history.get_history()
+        self.assertEqual(
+            entries[0]["input_image"],
+            ["/tmp/first.png", "/tmp/second.png"],
+        )
+        self.assertIn("Input images: 2", entries[0]["settings"])
+        input_html = updates[-1][5]
+        self.assertIn("/gradio_api/file=/tmp/first.png", input_html)
+        self.assertIn("/gradio_api/file=/tmp/second.png", input_html)
+        self.assertIn("Input image 1", input_html)
+        self.assertIn("Input image 2", input_html)
+
+    def test_history_input_html_renders_single_and_batch_inputs(self):
+        self.assertIn(
+            "No input image",
+            history.history_input_html(None),
+        )
+        self.assertIn(
+            "Input image</figcaption>",
+            history.history_input_html("/tmp/only.png"),
+        )
+        self.assertIn(
+            "Input image</figcaption>",
+            history.history_input_html(["/tmp/only.png"]),
+        )
+
+        batch_html = history.history_input_html(
+            ["/tmp/first.png", "/tmp/second.png"]
+        )
+        self.assertIn("Input image 1", batch_html)
+        self.assertIn("Input image 2", batch_html)
+        self.assertIn("/gradio_api/file=/tmp/second.png", batch_html)
+
     def test_generation_completes_in_memory_after_client_disconnect(self):
         release_generation = threading.Event()
         outputs = [
@@ -1034,6 +1159,20 @@ class UiConfigTests(unittest.TestCase):
         self.assertIn("font-size: 16px", main.PROMPT_CSS)
         self.assertIn(".history-select input", main.PROMPT_CSS)
         self.assertIn(".image-url-input input", main.PROMPT_CSS)
+
+    def test_edit_tab_accepts_batch_image_uploads(self):
+        config = main.demo.get_config_file()
+        galleries = [
+            component
+            for component in config["components"]
+            if component.get("props", {}).get("label")
+            == f"Input Images (max {workflows.MAX_EDIT_BATCH_SIZE} per batch)"
+        ]
+
+        self.assertEqual(len(galleries), 1)
+        self.assertEqual(galleries[0]["type"], "gallery")
+        self.assertTrue(galleries[0]["props"]["interactive"])
+        self.assertEqual(galleries[0]["props"]["file_types"], ["image"])
 
     def test_job_events_allow_concurrent_runs(self):
         job_limits = {

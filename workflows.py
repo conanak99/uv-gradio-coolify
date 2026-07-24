@@ -46,6 +46,8 @@ type CompletedJob = tuple[str, list[GalleryItem]]
 # each job occupies one worker while its model fan-out runs.
 JOB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 JOB_HEARTBEAT_SECONDS = 1.0
+# One edit submission (batch) accepts at most this many input images.
+MAX_EDIT_BATCH_SIZE = 5
 
 
 # --- Input handling -------------------------------------------------------
@@ -64,16 +66,41 @@ def normalize_image_url(image_url: str | None) -> str | None:
     return normalized_url
 
 
-def select_edit_image_input(
-    image_path: str | None,
+def gallery_image_paths(gallery_value: object) -> list[str]:
+    """Extract file paths from a gr.Gallery input value.
+
+    The gallery passes a list of (media, caption) tuples; accept bare path
+    strings too so single-image callers keep working.
+    """
+    if not gallery_value:
+        return []
+    if isinstance(gallery_value, str):
+        return [gallery_value]
+    paths: list[str] = []
+    for item in gallery_value:
+        media = item[0] if isinstance(item, list | tuple) else item
+        if isinstance(media, str) and media:
+            paths.append(media)
+    return paths
+
+
+def select_edit_image_inputs(
+    image_paths: object,
     image_url: str | None = None,
-) -> ImageReference:
+) -> list[ImageReference]:
+    """Combine uploaded images and the optional URL into one batch (max 5)."""
+    image_references = gallery_image_paths(image_paths)
     normalized_url = normalize_image_url(image_url)
     if normalized_url:
-        return normalized_url
-    if image_path:
-        return image_path
-    raise gr.Error("Please provide an input image or image URL.")
+        image_references.append(normalized_url)
+    if not image_references:
+        raise gr.Error("Please provide an input image or image URL.")
+    if len(image_references) > MAX_EDIT_BATCH_SIZE:
+        raise gr.Error(
+            f"Please submit at most {MAX_EDIT_BATCH_SIZE} images per batch "
+            f"(got {len(image_references)})."
+        )
+    return image_references
 
 
 def prepare_edit_inputs(
@@ -204,13 +231,13 @@ def run_models_in_parallel(
 
 
 def edit_image(
-    image_path: str | None,
+    image_paths: object,
     prompt: str,
     models: list[ModelName],
     progress_callback: ProgressCallback | None = None,
     image_url: str | None = None,
 ) -> list[GalleryItem]:
-    image_reference = select_edit_image_input(image_path, image_url)
+    image_references = select_edit_image_inputs(image_paths, image_url)
     if not prompt:
         raise gr.Error("Please provide a prompt.")
     if not models:
@@ -219,18 +246,26 @@ def edit_image(
         raise gr.Error("Please select valid edit models.")
 
     selected_models = [EDIT_MODELS[model_name] for model_name in models]
-    provider_inputs = prepare_edit_inputs(
-        {model.provider for model in selected_models},
-        image_reference,
-    )
-    tasks: dict[ModelName, Callable[[], list[GalleryItem]]] = {
-        model.name: (
-            lambda model=model: run_edit_model(
-                model, provider_inputs[model.provider], prompt
+    providers = {model.provider for model in selected_models}
+    provider_inputs_per_image = [
+        prepare_edit_inputs(providers, image_reference)
+        for image_reference in image_references
+    ]
+    batch_mode = len(image_references) > 1
+    tasks: dict[ModelName, Callable[[], list[GalleryItem]]] = {}
+    for image_number, provider_inputs in enumerate(provider_inputs_per_image, start=1):
+        for model in selected_models:
+            task_name = (
+                f"{model.name} · Image {image_number}" if batch_mode else model.name
             )
-        )
-        for model in selected_models
-    }
+            tasks[task_name] = (
+                lambda model=model,
+                image_reference=provider_inputs[model.provider],
+                caption=task_name: [
+                    (output_url, caption)
+                    for output_url, _ in run_edit_model(model, image_reference, prompt)
+                ]
+            )
     return run_models_in_parallel("edit", tasks, progress_callback)
 
 
@@ -267,7 +302,7 @@ def generate_image(
 def record_job(
     operation: str,
     prompt: str,
-    input_image: ImageReference | None,
+    input_image: ImageReference | list[ImageReference] | None,
     settings: str,
     run: Callable[[], list[GalleryItem]],
 ) -> CompletedJob:
@@ -301,25 +336,33 @@ def record_job(
 
 
 def run_edit_job(
-    image_path: str | None,
+    image_paths: object,
     image_url: str | None,
     prompt: str,
     models: list[ModelName],
     progress_queue: queue.Queue[list[GalleryItem]],
 ) -> CompletedJob:
-    image_reference = select_edit_image_input(image_path, image_url)
+    image_references = select_edit_image_inputs(image_paths, image_url)
     logger.info(
-        "job request operation=edit models=%d prompt_chars=%d",
+        "job request operation=edit models=%d images=%d prompt_chars=%d",
         len(models),
+        len(image_references),
         len(prompt),
     )
+    settings = f'Models: {", ".join(models)}'
+    if len(image_references) > 1:
+        settings += f" · Input images: {len(image_references)}"
     return record_job(
         operation="Edit",
         prompt=prompt,
-        input_image=image_reference,
-        settings=f'Models: {", ".join(models)}',
+        input_image=(
+            image_references[0]
+            if len(image_references) == 1
+            else image_references
+        ),
+        settings=settings,
         run=lambda: edit_image(
-            image_path,
+            image_paths,
             prompt,
             models,
             progress_queue.put,
@@ -430,7 +473,7 @@ def stream_job(
 
 
 def edit_image_flow(
-    image_path: str | None,
+    image_paths: object,
     image_url: str | None,
     prompt: str,
     models: list[ModelName],
@@ -438,7 +481,7 @@ def edit_image_flow(
     progress_queue: queue.Queue[list[GalleryItem]] = queue.Queue()
     future = JOB_EXECUTOR.submit(
         run_edit_job,
-        image_path,
+        image_paths,
         image_url,
         prompt,
         models,
