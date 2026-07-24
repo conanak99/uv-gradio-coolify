@@ -42,9 +42,9 @@ type ModelName = str
 type ProgressCallback = Callable[[list[GalleryItem]], None]
 type CompletedJob = tuple[str, list[GalleryItem]]
 
-# Sized for the UI's concurrency limit (5 concurrent edit + 5 generate jobs);
-# each job occupies one worker while its model fan-out runs.
-JOB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=10)
+# Sized for the UI's concurrency limit (5 concurrent edit + 5 batch edit +
+# 5 generate jobs); each job occupies one worker while its model fan-out runs.
+JOB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=15)
 JOB_HEARTBEAT_SECONDS = 1.0
 # One edit submission (batch) accepts at most this many input images.
 MAX_EDIT_BATCH_SIZE = 8
@@ -84,17 +84,22 @@ def gallery_image_paths(gallery_value: object) -> list[str]:
     return paths
 
 
-def select_edit_image_inputs(
-    image_paths: object,
+def select_edit_image_input(
+    image_path: str | None,
     image_url: str | None = None,
-) -> list[ImageReference]:
-    """Combine uploaded images and the optional URL into one batch (max 5)."""
-    image_references = gallery_image_paths(image_paths)
+) -> ImageReference:
     normalized_url = normalize_image_url(image_url)
     if normalized_url:
-        image_references.append(normalized_url)
+        return normalized_url
+    if image_path:
+        return image_path
+    raise gr.Error("Please provide an input image or image URL.")
+
+
+def select_edit_batch_inputs(image_paths: object) -> list[ImageReference]:
+    image_references = gallery_image_paths(image_paths)
     if not image_references:
-        raise gr.Error("Please provide an input image or image URL.")
+        raise gr.Error("Please upload at least one input image.")
     if len(image_references) > MAX_EDIT_BATCH_SIZE:
         raise gr.Error(
             f"Please submit at most {MAX_EDIT_BATCH_SIZE} images per batch "
@@ -234,14 +239,13 @@ def run_models_in_parallel(
     return results
 
 
-def edit_image(
-    image_paths: object,
+def edit_images(
+    image_references: list[ImageReference],
     prompt: str,
     models: list[ModelName],
     progress_callback: ProgressCallback | None = None,
-    image_url: str | None = None,
 ) -> list[GalleryItem]:
-    image_references = select_edit_image_inputs(image_paths, image_url)
+    """Run every selected model on every input image, all in parallel."""
     if not prompt:
         raise gr.Error("Please provide a prompt.")
     if not models:
@@ -280,6 +284,17 @@ def edit_image(
                 ]
             )
     return run_models_in_parallel("edit", tasks, progress_callback)
+
+
+def edit_image(
+    image_path: str | None,
+    prompt: str,
+    models: list[ModelName],
+    progress_callback: ProgressCallback | None = None,
+    image_url: str | None = None,
+) -> list[GalleryItem]:
+    image_reference = select_edit_image_input(image_path, image_url)
+    return edit_images([image_reference], prompt, models, progress_callback)
 
 
 def generate_image(
@@ -349,37 +364,63 @@ def record_job(
 
 
 def run_edit_job(
-    image_paths: object,
+    image_path: str | None,
     image_url: str | None,
     prompt: str,
     models: list[ModelName],
     progress_queue: queue.Queue[list[GalleryItem]],
 ) -> CompletedJob:
-    image_references = select_edit_image_inputs(image_paths, image_url)
+    image_reference = select_edit_image_input(image_path, image_url)
     logger.info(
-        "job request operation=edit models=%d images=%d prompt_chars=%d",
+        "job request operation=edit models=%d prompt_chars=%d",
+        len(models),
+        len(prompt),
+    )
+    return record_job(
+        operation="Edit",
+        prompt=prompt,
+        input_image=image_reference,
+        settings=f'Models: {", ".join(models)}',
+        run=lambda: edit_image(
+            image_path,
+            prompt,
+            models,
+            progress_queue.put,
+            image_url=image_url,
+        ),
+    )
+
+
+def run_batch_edit_job(
+    image_paths: object,
+    prompt: str,
+    models: list[ModelName],
+    progress_queue: queue.Queue[list[GalleryItem]],
+) -> CompletedJob:
+    image_references = select_edit_batch_inputs(image_paths)
+    logger.info(
+        "job request operation=batch-edit models=%d images=%d prompt_chars=%d",
         len(models),
         len(image_references),
         len(prompt),
     )
-    settings = f'Models: {", ".join(models)}'
-    if len(image_references) > 1:
-        settings += f" · Input images: {len(image_references)}"
     return record_job(
-        operation="Edit",
+        operation="Batch Edit",
         prompt=prompt,
         input_image=(
             image_references[0]
             if len(image_references) == 1
             else image_references
         ),
-        settings=settings,
-        run=lambda: edit_image(
-            image_paths,
+        settings=(
+            f'Models: {", ".join(models)} · '
+            f"Input images: {len(image_references)}"
+        ),
+        run=lambda: edit_images(
+            image_references,
             prompt,
             models,
             progress_queue.put,
-            image_url=image_url,
         ),
     )
 
@@ -486,7 +527,7 @@ def stream_job(
 
 
 def edit_image_flow(
-    image_paths: object,
+    image_path: str | None,
     image_url: str | None,
     prompt: str,
     models: list[ModelName],
@@ -494,13 +535,29 @@ def edit_image_flow(
     progress_queue: queue.Queue[list[GalleryItem]] = queue.Queue()
     future = JOB_EXECUTOR.submit(
         run_edit_job,
-        image_paths,
+        image_path,
         image_url,
         prompt,
         models,
         progress_queue,
     )
     yield from stream_job("Editing", "Edit Image", future, progress_queue)
+
+
+def batch_edit_image_flow(
+    image_paths: object,
+    prompt: str,
+    models: list[ModelName],
+):
+    progress_queue: queue.Queue[list[GalleryItem]] = queue.Queue()
+    future = JOB_EXECUTOR.submit(
+        run_batch_edit_job,
+        image_paths,
+        prompt,
+        models,
+        progress_queue,
+    )
+    yield from stream_job("Editing", "Edit Images", future, progress_queue)
 
 
 def generate_image_flow(

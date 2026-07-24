@@ -18,7 +18,7 @@ Then open the URL printed in the terminal (defaults to <http://127.0.0.1:7860>).
 
 ## Notes
 
-- **Batch edits**: The Edit tab accepts up to 8 input images per submission (uploaded images plus the optional image URL combined). Images are prepared (uploaded/downloaded) concurrently and every selected model runs on every image in parallel, with results captioned per image.
+- **Batch edits**: The Batch Edit tab (separate from the single-image Edit tab, which is unchanged) accepts up to 8 input images per submission. Images are prepared (uploaded/downloaded) concurrently and every selected model runs on every image in parallel, with results captioned per image.
 - **Image preparation**: Input images with any dimension larger than 2048px are automatically scaled down. Seedream edits select the closest supported output ratio and center-crop a temporary input copy to match it. NanoGPT inputs are converted to the highest-quality JPEG that stays below its request limit; the uploaded original is unchanged.
 - **Generation models**: Run Grok Imagine, Seedream 5.0 Lite/Pro, and WAN 2.7 Image/Pro individually or in parallel. The UI offers five fixed aspect ratios; models without an exact match use their closest supported ratio.
 - **Progressive results**: Edit and generation galleries update whenever each selected model finishes. While waiting, one-second heartbeats update the elapsed timer and keep the Gradio connection alive. Shared history is finalized only after the complete background job finishes.

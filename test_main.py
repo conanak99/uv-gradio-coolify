@@ -578,7 +578,7 @@ class ProviderRoutingTests(unittest.TestCase):
             ) as run_edit_model,
         ):
             result = workflows.edit_image(
-                None,
+                "/tmp/uploaded.png",
                 "Improve the lighting",
                 [model_name],
                 image_url=" https://image.test/input.png ",
@@ -597,34 +597,32 @@ class ProviderRoutingTests(unittest.TestCase):
             "Improve the lighting",
         )
 
-    def test_select_edit_image_inputs_combines_gallery_and_url(self):
-        image_references = workflows.select_edit_image_inputs(
+    def test_select_edit_batch_inputs_parses_gallery_values(self):
+        image_references = workflows.select_edit_batch_inputs(
             [("/tmp/first.png", None), "/tmp/second.png"],
-            image_url=" https://image.test/third.png ",
         )
 
         self.assertEqual(
             image_references,
-            [
-                "/tmp/first.png",
-                "/tmp/second.png",
-                "https://image.test/third.png",
-            ],
+            ["/tmp/first.png", "/tmp/second.png"],
         )
 
-    def test_select_edit_image_inputs_rejects_oversized_batch(self):
+        with self.assertRaisesRegex(Exception, "at least one input image"):
+            workflows.select_edit_batch_inputs(None)
+
+    def test_select_edit_batch_inputs_rejects_oversized_batch(self):
         images = [f"/tmp/input-{index}.png" for index in range(9)]
 
         with self.assertRaisesRegex(Exception, "at most 8 images per batch"):
-            workflows.select_edit_image_inputs(images)
+            workflows.select_edit_batch_inputs(images)
 
         self.assertEqual(workflows.MAX_EDIT_BATCH_SIZE, 8)
         self.assertEqual(
-            len(workflows.select_edit_image_inputs(images[:8])),
+            len(workflows.select_edit_batch_inputs(images[:8])),
             8,
         )
 
-    def test_edit_image_prepares_batch_inputs_in_parallel(self):
+    def test_edit_images_prepares_batch_inputs_in_parallel(self):
         # Each preparation blocks until all of them have started; a serial
         # loop would deadlock and break the barrier after its timeout.
         barrier = threading.Barrier(3, timeout=2)
@@ -642,7 +640,7 @@ class ProviderRoutingTests(unittest.TestCase):
             ),
             patch.object(workflows, "run_edit_model", side_effect=edit_result),
         ):
-            results = workflows.edit_image(
+            results = workflows.edit_images(
                 ["/tmp/first.png", "/tmp/second.png", "/tmp/third.png"],
                 "Improve the lighting",
                 ["Qwen Image Edit"],
@@ -651,7 +649,7 @@ class ProviderRoutingTests(unittest.TestCase):
         self.assertEqual(len(results), 3)
         self.assertFalse(barrier.broken)
 
-    def test_edit_image_batch_runs_each_image_across_models(self):
+    def test_edit_images_runs_each_image_across_models(self):
         model_name = "Qwen Image Edit"
 
         def edit_result(model, image_reference, _prompt):
@@ -668,12 +666,15 @@ class ProviderRoutingTests(unittest.TestCase):
             ) as run_edit_model,
         ):
             progress_updates = []
-            results = workflows.edit_image(
-                [("/tmp/first.png", None), ("/tmp/second.png", None)],
+            results = workflows.edit_images(
+                [
+                    "/tmp/first.png",
+                    "/tmp/second.png",
+                    "https://image.test/third.png",
+                ],
                 "Improve the lighting",
                 [model_name],
                 progress_updates.append,
-                image_url="https://image.test/third.png",
             )
 
         self.assertEqual(len(results), 3)
@@ -1013,23 +1014,32 @@ class HistoryTests(unittest.TestCase):
         self.assertIn("https://image.test/input.png", updates[-1][5])
         self.assertIn("https://image.test/edited.png", updates[-1][6])
 
-    def test_edit_flow_batch_stores_all_inputs_in_history(self):
+    def test_batch_edit_flow_stores_all_inputs_in_history(self):
         outputs = [
             ("https://image.test/edited-1.png", "Qwen Image Edit · Image 1"),
             ("https://image.test/edited-2.png", "Qwen Image Edit · Image 2"),
         ]
 
-        with patch.object(workflows, "edit_image", return_value=outputs):
+        with patch.object(
+            workflows, "edit_images", return_value=outputs
+        ) as edit_images:
             updates = list(
-                workflows.edit_image_flow(
+                workflows.batch_edit_image_flow(
                     [("/tmp/first.png", None), ("/tmp/second.png", None)],
-                    None,
                     "Batch edit",
                     ["Qwen Image Edit"],
                 )
             )
 
+        edit_images.assert_called_once_with(
+            ["/tmp/first.png", "/tmp/second.png"],
+            "Batch edit",
+            ["Qwen Image Edit"],
+            ANY,
+        )
+        self.assertEqual(updates[0][1]["value"], "Editing... 0s")
         entries = history.get_history()
+        self.assertEqual(entries[0]["operation"], "Batch Edit")
         self.assertEqual(
             entries[0]["input_image"],
             ["/tmp/first.png", "/tmp/second.png"],
@@ -1175,7 +1185,7 @@ class UiConfigTests(unittest.TestCase):
             in component.get("props", {}).get("elem_classes", [])
         ]
 
-        self.assertEqual(len(prompt_inputs), 2)
+        self.assertEqual(len(prompt_inputs), 3)
         self.assertEqual(len(history_selects), 1)
         self.assertEqual(len(image_url_inputs), 1)
         self.assertEqual(
@@ -1187,7 +1197,18 @@ class UiConfigTests(unittest.TestCase):
         self.assertIn(".history-select input", main.PROMPT_CSS)
         self.assertIn(".image-url-input input", main.PROMPT_CSS)
 
-    def test_edit_tab_accepts_batch_image_uploads(self):
+    def test_edit_tab_keeps_single_image_input(self):
+        config = main.demo.get_config_file()
+        single_inputs = [
+            component
+            for component in config["components"]
+            if component["type"] == "image"
+            and component.get("props", {}).get("label") == "Input Image"
+        ]
+
+        self.assertEqual(len(single_inputs), 1)
+
+    def test_batch_edit_tab_accepts_batch_image_uploads(self):
         config = main.demo.get_config_file()
         galleries = [
             component
@@ -1205,13 +1226,19 @@ class UiConfigTests(unittest.TestCase):
         job_limits = {
             event.name: event.concurrency_limit
             for event in main.demo.fns.values()
-            if event.name in ("edit_image_flow", "generate_image_flow")
+            if event.name
+            in (
+                "edit_image_flow",
+                "batch_edit_image_flow",
+                "generate_image_flow",
+            )
         }
 
         self.assertEqual(
             job_limits,
             {
                 "edit_image_flow": main.JOB_CONCURRENCY_LIMIT,
+                "batch_edit_image_flow": main.JOB_CONCURRENCY_LIMIT,
                 "generate_image_flow": main.JOB_CONCURRENCY_LIMIT,
             },
         )
