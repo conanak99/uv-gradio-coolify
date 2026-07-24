@@ -613,16 +613,43 @@ class ProviderRoutingTests(unittest.TestCase):
         )
 
     def test_select_edit_image_inputs_rejects_oversized_batch(self):
-        images = [f"/tmp/input-{index}.png" for index in range(6)]
+        images = [f"/tmp/input-{index}.png" for index in range(9)]
 
-        with self.assertRaisesRegex(Exception, "at most 5 images per batch"):
+        with self.assertRaisesRegex(Exception, "at most 8 images per batch"):
             workflows.select_edit_image_inputs(images)
 
-        self.assertEqual(workflows.MAX_EDIT_BATCH_SIZE, 5)
+        self.assertEqual(workflows.MAX_EDIT_BATCH_SIZE, 8)
         self.assertEqual(
-            len(workflows.select_edit_image_inputs(images[:5])),
-            5,
+            len(workflows.select_edit_image_inputs(images[:8])),
+            8,
         )
+
+    def test_edit_image_prepares_batch_inputs_in_parallel(self):
+        # Each preparation blocks until all of them have started; a serial
+        # loop would deadlock and break the barrier after its timeout.
+        barrier = threading.Barrier(3, timeout=2)
+
+        def synchronized_prepare(_providers, image_reference):
+            barrier.wait()
+            return {models.Provider.FAL: image_reference}
+
+        def edit_result(model, image_reference, _prompt):
+            return [(f"https://image.test/{image_reference}", model.name)]
+
+        with (
+            patch.object(
+                workflows, "prepare_edit_inputs", side_effect=synchronized_prepare
+            ),
+            patch.object(workflows, "run_edit_model", side_effect=edit_result),
+        ):
+            results = workflows.edit_image(
+                ["/tmp/first.png", "/tmp/second.png", "/tmp/third.png"],
+                "Improve the lighting",
+                ["Qwen Image Edit"],
+            )
+
+        self.assertEqual(len(results), 3)
+        self.assertFalse(barrier.broken)
 
     def test_edit_image_batch_runs_each_image_across_models(self):
         model_name = "Qwen Image Edit"

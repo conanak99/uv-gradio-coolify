@@ -47,7 +47,7 @@ type CompletedJob = tuple[str, list[GalleryItem]]
 JOB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 JOB_HEARTBEAT_SECONDS = 1.0
 # One edit submission (batch) accepts at most this many input images.
-MAX_EDIT_BATCH_SIZE = 5
+MAX_EDIT_BATCH_SIZE = 8
 
 
 # --- Input handling -------------------------------------------------------
@@ -199,7 +199,11 @@ def run_models_in_parallel(
     """Run one task per model, reporting partial results as each finishes."""
     results: list[GalleryItem] = []
     errors: list[str] = []
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    # One worker per task so a full batch (images x models) runs concurrently
+    # instead of queueing behind the default worker count.
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=max(1, len(tasks))
+    ) as executor:
         futures = {
             executor.submit(run_timed_task, task): model_name
             for model_name, task in tasks.items()
@@ -247,10 +251,19 @@ def edit_image(
 
     selected_models = [EDIT_MODELS[model_name] for model_name in models]
     providers = {model.provider for model in selected_models}
-    provider_inputs_per_image = [
-        prepare_edit_inputs(providers, image_reference)
-        for image_reference in image_references
-    ]
+    # Prepare every image concurrently: fal.ai uploads and URL downloads are
+    # network-bound, so a serial loop would delay the whole batch.
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=len(image_references)
+    ) as executor:
+        provider_inputs_per_image = list(
+            executor.map(
+                lambda image_reference: prepare_edit_inputs(
+                    providers, image_reference
+                ),
+                image_references,
+            )
+        )
     batch_mode = len(image_references) > 1
     tasks: dict[ModelName, Callable[[], list[GalleryItem]]] = {}
     for image_number, provider_inputs in enumerate(provider_inputs_per_image, start=1):
