@@ -49,10 +49,12 @@ def valid_model_selection(
 def load_model_preferences(
     saved_edit_models: object,
     saved_generate_models: object,
-) -> tuple[list[str], list[str]]:
+    saved_batch_edit_models: object,
+) -> tuple[list[str], list[str], list[str]]:
     return (
         valid_model_selection(saved_edit_models, DEFAULT_EDIT_MODELS),
         valid_model_selection(saved_generate_models, DEFAULT_GENERATE_MODELS),
+        valid_model_selection(saved_batch_edit_models, DEFAULT_EDIT_MODELS),
     )
 
 
@@ -131,6 +133,16 @@ with gr.Blocks(title="Image Studio") as demo:
     edit_prompt_state = gr.BrowserState(
         "",
         storage_key="image-studio-edit-prompt",
+        secret=BROWSER_STATE_SECRET,
+    )
+    batch_edit_models_preference = gr.BrowserState(
+        DEFAULT_EDIT_MODELS,
+        storage_key="image-studio-batch-edit-models",
+        secret=BROWSER_STATE_SECRET,
+    )
+    batch_edit_prompt_state = gr.BrowserState(
+        "",
+        storage_key="image-studio-batch-edit-prompt",
         secret=BROWSER_STATE_SECRET,
     )
 
@@ -281,6 +293,20 @@ with gr.Blocks(title="Image Studio") as demo:
         outputs=[batch_edit_gallery, batch_edit_btn, *history_outputs],
         concurrency_limit=JOB_CONCURRENCY_LIMIT,
     )
+    batch_models.change(
+        fn=save_edit_model_preference,
+        inputs=[batch_models],
+        outputs=[batch_edit_models_preference],
+        queue=False,
+        show_progress="hidden",
+    )
+    batch_edit_prompt.change(
+        fn=edit_prompt_preference,
+        inputs=[batch_edit_prompt],
+        outputs=[batch_edit_prompt_state],
+        queue=False,
+        show_progress="hidden",
+    )
     for url_event in (input_image_url.change, input_image_url.submit):
         url_event(
             fn=preview_image_url,
@@ -337,8 +363,12 @@ with gr.Blocks(title="Image Studio") as demo:
     )
     demo.load(
         fn=load_model_preferences,
-        inputs=[edit_models_preference, generate_models_preference],
-        outputs=[models, gen_models],
+        inputs=[
+            edit_models_preference,
+            generate_models_preference,
+            batch_edit_models_preference,
+        ],
+        outputs=[models, gen_models, batch_models],
         queue=False,
         show_progress="hidden",
     )
@@ -346,6 +376,13 @@ with gr.Blocks(title="Image Studio") as demo:
         fn=edit_prompt_preference,
         inputs=[edit_prompt_state],
         outputs=[edit_prompt],
+        queue=False,
+        show_progress="hidden",
+    )
+    demo.load(
+        fn=edit_prompt_preference,
+        inputs=[batch_edit_prompt_state],
+        outputs=[batch_edit_prompt],
         queue=False,
         show_progress="hidden",
     )

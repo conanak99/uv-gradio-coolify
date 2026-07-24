@@ -1114,23 +1114,32 @@ class UiConfigTests(unittest.TestCase):
     def test_model_preferences_restore_only_available_models(self):
         edit_model = main.DEFAULT_EDIT_MODELS[0]
         generate_model = main.DEFAULT_GENERATE_MODELS[-1]
+        batch_edit_model = main.DEFAULT_EDIT_MODELS[-1]
 
-        edit_models, generate_models = main.load_model_preferences(
-            [edit_model, "Removed Edit Model"],
-            ["Removed Generate Model", generate_model],
+        edit_models, generate_models, batch_edit_models = (
+            main.load_model_preferences(
+                [edit_model, "Removed Edit Model"],
+                ["Removed Generate Model", generate_model],
+                [batch_edit_model, "Removed Batch Model"],
+            )
         )
 
         self.assertEqual(edit_models, [edit_model])
         self.assertEqual(generate_models, [generate_model])
+        self.assertEqual(batch_edit_models, [batch_edit_model])
 
     def test_model_preferences_fall_back_to_defaults_for_invalid_state(self):
-        edit_models, generate_models = main.load_model_preferences(
-            None,
-            [{"bad": "state"}],
+        edit_models, generate_models, batch_edit_models = (
+            main.load_model_preferences(
+                None,
+                [{"bad": "state"}],
+                "not-a-list",
+            )
         )
 
         self.assertEqual(edit_models, main.DEFAULT_EDIT_MODELS)
         self.assertEqual(generate_models, main.DEFAULT_GENERATE_MODELS)
+        self.assertEqual(batch_edit_models, main.DEFAULT_EDIT_MODELS)
 
     def test_model_preference_save_ignores_removed_models(self):
         edit_model = main.DEFAULT_EDIT_MODELS[-1]
@@ -1155,6 +1164,23 @@ class UiConfigTests(unittest.TestCase):
 
     def test_edit_prompt_preference_ignores_invalid_state(self):
         self.assertEqual(main.edit_prompt_preference(["not", "text"]), "")
+
+    def test_batch_edit_preferences_persist_in_browser_state(self):
+        config = main.demo.get_config_file()
+        storage_keys = {
+            component["props"].get("storage_key")
+            for component in config["components"]
+            if component["type"] == "browserstate"
+        }
+
+        self.assertIn("image-studio-batch-edit-models", storage_keys)
+        self.assertIn("image-studio-batch-edit-prompt", storage_keys)
+
+        fn_names = [event.name for event in main.demo.fns.values()]
+        # Edit and Batch Edit each save their model selection on change.
+        self.assertEqual(fn_names.count("save_edit_model_preference"), 2)
+        # Both prompts save on change and are restored on page load.
+        self.assertEqual(fn_names.count("edit_prompt_preference"), 4)
 
     def test_image_url_preview_renders_valid_http_urls(self):
         preview = main.preview_image_url(" https://image.test/input.png ")
