@@ -42,10 +42,12 @@ type ModelName = str
 type ProgressCallback = Callable[[list[GalleryItem]], None]
 type CompletedJob = tuple[str, list[GalleryItem]]
 
-# Sized for the UI's concurrency limit (5 concurrent edit + 5 generate jobs);
-# each job occupies one worker while its model fan-out runs.
-JOB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=10)
+# Sized for the UI's concurrency limit (5 concurrent edit + 5 batch edit +
+# 5 generate jobs); each job occupies one worker while its model fan-out runs.
+JOB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=15)
 JOB_HEARTBEAT_SECONDS = 1.0
+# One edit submission (batch) accepts at most this many input images.
+MAX_EDIT_BATCH_SIZE = 8
 
 
 # --- Input handling -------------------------------------------------------
@@ -64,6 +66,24 @@ def normalize_image_url(image_url: str | None) -> str | None:
     return normalized_url
 
 
+def gallery_image_paths(gallery_value: object) -> list[str]:
+    """Extract file paths from a gr.Gallery input value.
+
+    The gallery passes a list of (media, caption) tuples; accept bare path
+    strings too so single-image callers keep working.
+    """
+    if not gallery_value:
+        return []
+    if isinstance(gallery_value, str):
+        return [gallery_value]
+    paths: list[str] = []
+    for item in gallery_value:
+        media = item[0] if isinstance(item, list | tuple) else item
+        if isinstance(media, str) and media:
+            paths.append(media)
+    return paths
+
+
 def select_edit_image_input(
     image_path: str | None,
     image_url: str | None = None,
@@ -74,6 +94,18 @@ def select_edit_image_input(
     if image_path:
         return image_path
     raise gr.Error("Please provide an input image or image URL.")
+
+
+def select_edit_batch_inputs(image_paths: object) -> list[ImageReference]:
+    image_references = gallery_image_paths(image_paths)
+    if not image_references:
+        raise gr.Error("Please upload at least one input image.")
+    if len(image_references) > MAX_EDIT_BATCH_SIZE:
+        raise gr.Error(
+            f"Please submit at most {MAX_EDIT_BATCH_SIZE} images per batch "
+            f"(got {len(image_references)})."
+        )
+    return image_references
 
 
 def prepare_edit_inputs(
@@ -172,7 +204,11 @@ def run_models_in_parallel(
     """Run one task per model, reporting partial results as each finishes."""
     results: list[GalleryItem] = []
     errors: list[str] = []
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    # One worker per task so a full batch (images x models) runs concurrently
+    # instead of queueing behind the default worker count.
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=max(1, len(tasks))
+    ) as executor:
         futures = {
             executor.submit(run_timed_task, task): model_name
             for model_name, task in tasks.items()
@@ -203,14 +239,13 @@ def run_models_in_parallel(
     return results
 
 
-def edit_image(
-    image_path: str | None,
+def edit_images(
+    image_references: list[ImageReference],
     prompt: str,
     models: list[ModelName],
     progress_callback: ProgressCallback | None = None,
-    image_url: str | None = None,
 ) -> list[GalleryItem]:
-    image_reference = select_edit_image_input(image_path, image_url)
+    """Run every selected model on every input image, all in parallel."""
     if not prompt:
         raise gr.Error("Please provide a prompt.")
     if not models:
@@ -219,19 +254,47 @@ def edit_image(
         raise gr.Error("Please select valid edit models.")
 
     selected_models = [EDIT_MODELS[model_name] for model_name in models]
-    provider_inputs = prepare_edit_inputs(
-        {model.provider for model in selected_models},
-        image_reference,
-    )
-    tasks: dict[ModelName, Callable[[], list[GalleryItem]]] = {
-        model.name: (
-            lambda model=model: run_edit_model(
-                model, provider_inputs[model.provider], prompt
+    providers = {model.provider for model in selected_models}
+    # Prepare every image concurrently: fal.ai uploads and URL downloads are
+    # network-bound, so a serial loop would delay the whole batch.
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=len(image_references)
+    ) as executor:
+        provider_inputs_per_image = list(
+            executor.map(
+                lambda image_reference: prepare_edit_inputs(
+                    providers, image_reference
+                ),
+                image_references,
             )
         )
-        for model in selected_models
-    }
+    batch_mode = len(image_references) > 1
+    tasks: dict[ModelName, Callable[[], list[GalleryItem]]] = {}
+    for image_number, provider_inputs in enumerate(provider_inputs_per_image, start=1):
+        for model in selected_models:
+            task_name = (
+                f"{model.name} · Image {image_number}" if batch_mode else model.name
+            )
+            tasks[task_name] = (
+                lambda model=model,
+                image_reference=provider_inputs[model.provider],
+                caption=task_name: [
+                    (output_url, caption)
+                    for output_url, _ in run_edit_model(model, image_reference, prompt)
+                ]
+            )
     return run_models_in_parallel("edit", tasks, progress_callback)
+
+
+def edit_image(
+    image_path: str | None,
+    prompt: str,
+    models: list[ModelName],
+    progress_callback: ProgressCallback | None = None,
+    image_url: str | None = None,
+) -> list[GalleryItem]:
+    image_reference = select_edit_image_input(image_path, image_url)
+    return edit_images([image_reference], prompt, models, progress_callback)
 
 
 def generate_image(
@@ -267,7 +330,7 @@ def generate_image(
 def record_job(
     operation: str,
     prompt: str,
-    input_image: ImageReference | None,
+    input_image: ImageReference | list[ImageReference] | None,
     settings: str,
     run: Callable[[], list[GalleryItem]],
 ) -> CompletedJob:
@@ -324,6 +387,40 @@ def run_edit_job(
             models,
             progress_queue.put,
             image_url=image_url,
+        ),
+    )
+
+
+def run_batch_edit_job(
+    image_paths: object,
+    prompt: str,
+    models: list[ModelName],
+    progress_queue: queue.Queue[list[GalleryItem]],
+) -> CompletedJob:
+    image_references = select_edit_batch_inputs(image_paths)
+    logger.info(
+        "job request operation=batch-edit models=%d images=%d prompt_chars=%d",
+        len(models),
+        len(image_references),
+        len(prompt),
+    )
+    return record_job(
+        operation="Batch Edit",
+        prompt=prompt,
+        input_image=(
+            image_references[0]
+            if len(image_references) == 1
+            else image_references
+        ),
+        settings=(
+            f'Models: {", ".join(models)} · '
+            f"Input images: {len(image_references)}"
+        ),
+        run=lambda: edit_images(
+            image_references,
+            prompt,
+            models,
+            progress_queue.put,
         ),
     )
 
@@ -445,6 +542,22 @@ def edit_image_flow(
         progress_queue,
     )
     yield from stream_job("Editing", "Edit Image", future, progress_queue)
+
+
+def batch_edit_image_flow(
+    image_paths: object,
+    prompt: str,
+    models: list[ModelName],
+):
+    progress_queue: queue.Queue[list[GalleryItem]] = queue.Queue()
+    future = JOB_EXECUTOR.submit(
+        run_batch_edit_job,
+        image_paths,
+        prompt,
+        models,
+        progress_queue,
+    )
+    yield from stream_job("Editing", "Edit Images", future, progress_queue)
 
 
 def generate_image_flow(

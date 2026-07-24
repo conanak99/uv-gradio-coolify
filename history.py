@@ -20,7 +20,8 @@ class HistoryEntry(TypedDict):
     created_at: str
     operation: str
     prompt: str
-    input_image: str | None
+    # A single image reference, or a list of them for batch edits.
+    input_image: str | list[str] | None
     outputs: list[GalleryItem]
     settings: str
 
@@ -33,7 +34,15 @@ HISTORY_LOCK = threading.Lock()
 def get_history() -> History:
     with HISTORY_LOCK:
         return [
-            {**entry, "outputs": list(entry["outputs"])}
+            {
+                **entry,
+                "input_image": (
+                    list(entry["input_image"])
+                    if isinstance(entry["input_image"], list)
+                    else entry["input_image"]
+                ),
+                "outputs": list(entry["outputs"]),
+            }
             for entry in HISTORY_STORE
         ]
 
@@ -42,7 +51,7 @@ def add_history_entry(
     *,
     operation: str,
     prompt: str,
-    input_image: str | None,
+    input_image: str | list[str] | None,
     outputs: list[GalleryItem],
     settings: str,
 ) -> str:
@@ -51,7 +60,9 @@ def add_history_entry(
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "operation": operation,
         "prompt": prompt,
-        "input_image": input_image,
+        "input_image": (
+            list(input_image) if isinstance(input_image, list) else input_image
+        ),
         "outputs": list(outputs),
         "settings": settings,
     }
@@ -102,17 +113,36 @@ def history_image_html(media: str, caption: str) -> str:
     )
 
 
-def history_outputs_html(outputs: list[GalleryItem]) -> str:
-    if not outputs:
-        return "<p>No outputs yet.</p>"
+def history_grid_html(items: list[GalleryItem]) -> str:
     images = "".join(
         history_image_html(image_url, caption)
-        for image_url, caption in outputs
+        for image_url, caption in items
     )
     return (
         '<div style="display:grid;grid-template-columns:'
         'repeat(auto-fit,minmax(220px,1fr));gap:1rem">'
         f"{images}</div>"
+    )
+
+
+def history_outputs_html(outputs: list[GalleryItem]) -> str:
+    if not outputs:
+        return "<p>No outputs yet.</p>"
+    return history_grid_html(outputs)
+
+
+def history_input_html(input_image: str | list[str] | None) -> str:
+    if not input_image:
+        return "<p>No input image for this request.</p>"
+    if isinstance(input_image, str):
+        return history_image_html(input_image, "Input image")
+    if len(input_image) == 1:
+        return history_image_html(input_image[0], "Input image")
+    return history_grid_html(
+        [
+            (image, f"Input image {index}")
+            for index, image in enumerate(input_image, start=1)
+        ]
     )
 
 
@@ -130,15 +160,10 @@ def history_entry_view(
         f'**{entry["operation"]}** · {entry["created_at"]}\n\n'
         f'{entry["settings"]}'
     )
-    input_html = (
-        history_image_html(entry["input_image"], "Input image")
-        if entry["input_image"]
-        else "<p>No input image for this request.</p>"
-    )
     return (
         details,
         entry["prompt"],
-        input_html,
+        history_input_html(entry["input_image"]),
         history_outputs_html(entry["outputs"]),
     )
 

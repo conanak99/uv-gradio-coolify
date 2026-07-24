@@ -597,6 +597,110 @@ class ProviderRoutingTests(unittest.TestCase):
             "Improve the lighting",
         )
 
+    def test_select_edit_batch_inputs_parses_gallery_values(self):
+        image_references = workflows.select_edit_batch_inputs(
+            [("/tmp/first.png", None), "/tmp/second.png"],
+        )
+
+        self.assertEqual(
+            image_references,
+            ["/tmp/first.png", "/tmp/second.png"],
+        )
+
+        with self.assertRaisesRegex(Exception, "at least one input image"):
+            workflows.select_edit_batch_inputs(None)
+
+    def test_select_edit_batch_inputs_rejects_oversized_batch(self):
+        images = [f"/tmp/input-{index}.png" for index in range(9)]
+
+        with self.assertRaisesRegex(Exception, "at most 8 images per batch"):
+            workflows.select_edit_batch_inputs(images)
+
+        self.assertEqual(workflows.MAX_EDIT_BATCH_SIZE, 8)
+        self.assertEqual(
+            len(workflows.select_edit_batch_inputs(images[:8])),
+            8,
+        )
+
+    def test_edit_images_prepares_batch_inputs_in_parallel(self):
+        # Each preparation blocks until all of them have started; a serial
+        # loop would deadlock and break the barrier after its timeout.
+        barrier = threading.Barrier(3, timeout=2)
+
+        def synchronized_prepare(_providers, image_reference):
+            barrier.wait()
+            return {models.Provider.FAL: image_reference}
+
+        def edit_result(model, image_reference, _prompt):
+            return [(f"https://image.test/{image_reference}", model.name)]
+
+        with (
+            patch.object(
+                workflows, "prepare_edit_inputs", side_effect=synchronized_prepare
+            ),
+            patch.object(workflows, "run_edit_model", side_effect=edit_result),
+        ):
+            results = workflows.edit_images(
+                ["/tmp/first.png", "/tmp/second.png", "/tmp/third.png"],
+                "Improve the lighting",
+                ["Qwen Image Edit"],
+            )
+
+        self.assertEqual(len(results), 3)
+        self.assertFalse(barrier.broken)
+
+    def test_edit_images_runs_each_image_across_models(self):
+        model_name = "Qwen Image Edit"
+
+        def edit_result(model, image_reference, _prompt):
+            return [(f"https://image.test/{image_reference}.png", model.name)]
+
+        with (
+            patch.object(
+                workflows.fal_client,
+                "upload_image",
+                side_effect=lambda path: f"https://upload.test/{os.path.basename(path)}",
+            ) as upload_image,
+            patch.object(
+                workflows, "run_edit_model", side_effect=edit_result
+            ) as run_edit_model,
+        ):
+            progress_updates = []
+            results = workflows.edit_images(
+                [
+                    "/tmp/first.png",
+                    "/tmp/second.png",
+                    "https://image.test/third.png",
+                ],
+                "Improve the lighting",
+                [model_name],
+                progress_updates.append,
+            )
+
+        self.assertEqual(len(results), 3)
+        captions = sorted(caption for _url, caption in results)
+        for image_number, caption in enumerate(captions, start=1):
+            self.assertRegex(
+                caption,
+                rf"^{re.escape(model_name)} · Image {image_number} · \d+\.\ds$",
+            )
+        self.assertEqual(
+            [len(update) for update in progress_updates],
+            [1, 2, 3],
+        )
+        self.assertEqual(upload_image.call_count, 2)
+        edited_references = sorted(
+            call.args[1] for call in run_edit_model.call_args_list
+        )
+        self.assertEqual(
+            edited_references,
+            [
+                "https://image.test/third.png",
+                "https://upload.test/first.png",
+                "https://upload.test/second.png",
+            ],
+        )
+
     def test_edit_image_downloads_remote_url_for_nano_gpt(self):
         with (
             patch.object(
@@ -910,6 +1014,64 @@ class HistoryTests(unittest.TestCase):
         self.assertIn("https://image.test/input.png", updates[-1][5])
         self.assertIn("https://image.test/edited.png", updates[-1][6])
 
+    def test_batch_edit_flow_stores_all_inputs_in_history(self):
+        outputs = [
+            ("https://image.test/edited-1.png", "Qwen Image Edit · Image 1"),
+            ("https://image.test/edited-2.png", "Qwen Image Edit · Image 2"),
+        ]
+
+        with patch.object(
+            workflows, "edit_images", return_value=outputs
+        ) as edit_images:
+            updates = list(
+                workflows.batch_edit_image_flow(
+                    [("/tmp/first.png", None), ("/tmp/second.png", None)],
+                    "Batch edit",
+                    ["Qwen Image Edit"],
+                )
+            )
+
+        edit_images.assert_called_once_with(
+            ["/tmp/first.png", "/tmp/second.png"],
+            "Batch edit",
+            ["Qwen Image Edit"],
+            ANY,
+        )
+        self.assertEqual(updates[0][1]["value"], "Editing... 0s")
+        entries = history.get_history()
+        self.assertEqual(entries[0]["operation"], "Batch Edit")
+        self.assertEqual(
+            entries[0]["input_image"],
+            ["/tmp/first.png", "/tmp/second.png"],
+        )
+        self.assertIn("Input images: 2", entries[0]["settings"])
+        input_html = updates[-1][5]
+        self.assertIn("/gradio_api/file=/tmp/first.png", input_html)
+        self.assertIn("/gradio_api/file=/tmp/second.png", input_html)
+        self.assertIn("Input image 1", input_html)
+        self.assertIn("Input image 2", input_html)
+
+    def test_history_input_html_renders_single_and_batch_inputs(self):
+        self.assertIn(
+            "No input image",
+            history.history_input_html(None),
+        )
+        self.assertIn(
+            "Input image</figcaption>",
+            history.history_input_html("/tmp/only.png"),
+        )
+        self.assertIn(
+            "Input image</figcaption>",
+            history.history_input_html(["/tmp/only.png"]),
+        )
+
+        batch_html = history.history_input_html(
+            ["/tmp/first.png", "/tmp/second.png"]
+        )
+        self.assertIn("Input image 1", batch_html)
+        self.assertIn("Input image 2", batch_html)
+        self.assertIn("/gradio_api/file=/tmp/second.png", batch_html)
+
     def test_generation_completes_in_memory_after_client_disconnect(self):
         release_generation = threading.Event()
         outputs = [
@@ -1023,7 +1185,7 @@ class UiConfigTests(unittest.TestCase):
             in component.get("props", {}).get("elem_classes", [])
         ]
 
-        self.assertEqual(len(prompt_inputs), 2)
+        self.assertEqual(len(prompt_inputs), 3)
         self.assertEqual(len(history_selects), 1)
         self.assertEqual(len(image_url_inputs), 1)
         self.assertEqual(
@@ -1035,17 +1197,48 @@ class UiConfigTests(unittest.TestCase):
         self.assertIn(".history-select input", main.PROMPT_CSS)
         self.assertIn(".image-url-input input", main.PROMPT_CSS)
 
+    def test_edit_tab_keeps_single_image_input(self):
+        config = main.demo.get_config_file()
+        single_inputs = [
+            component
+            for component in config["components"]
+            if component["type"] == "image"
+            and component.get("props", {}).get("label") == "Input Image"
+        ]
+
+        self.assertEqual(len(single_inputs), 1)
+
+    def test_batch_edit_tab_accepts_batch_image_uploads(self):
+        config = main.demo.get_config_file()
+        galleries = [
+            component
+            for component in config["components"]
+            if component.get("props", {}).get("label")
+            == f"Input Images (max {workflows.MAX_EDIT_BATCH_SIZE} per batch)"
+        ]
+
+        self.assertEqual(len(galleries), 1)
+        self.assertEqual(galleries[0]["type"], "gallery")
+        self.assertTrue(galleries[0]["props"]["interactive"])
+        self.assertEqual(galleries[0]["props"]["file_types"], ["image"])
+
     def test_job_events_allow_concurrent_runs(self):
         job_limits = {
             event.name: event.concurrency_limit
             for event in main.demo.fns.values()
-            if event.name in ("edit_image_flow", "generate_image_flow")
+            if event.name
+            in (
+                "edit_image_flow",
+                "batch_edit_image_flow",
+                "generate_image_flow",
+            )
         }
 
         self.assertEqual(
             job_limits,
             {
                 "edit_image_flow": main.JOB_CONCURRENCY_LIMIT,
+                "batch_edit_image_flow": main.JOB_CONCURRENCY_LIMIT,
                 "generate_image_flow": main.JOB_CONCURRENCY_LIMIT,
             },
         )
