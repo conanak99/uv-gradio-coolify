@@ -27,6 +27,7 @@ SEEDREAM_LITE_GENERATE = "Seedream 5.0 Lite (NanoGPT)"
 SEEDREAM_PRO_GENERATE = "Seedream 5.0 Pro (NanoGPT)"
 WAN_27_GENERATE = "WAN 2.7 Image (NanoGPT)"
 WAN_27_PRO_GENERATE = "WAN 2.7 Image Pro (NanoGPT)"
+GROK_V2_EDIT = "Grok Imagine Image v2.0 Edit (NanoGPT)"
 SEEDREAM_PRO_EDIT = "Seedream 5.0 Pro Edit (NanoGPT)"
 WAN_26_EDIT = "WAN 2.6 Image Edit (NanoGPT)"
 P_IMAGE_EDIT = "P-Image Edit (NanoGPT)"
@@ -184,7 +185,7 @@ class NanoGptTests(unittest.TestCase):
         self.assertNotIn("Improve the lighting", logs)
 
     def test_auto_ratio_edit_models_send_no_size_so_output_matches_input(self):
-        for model_name in (WAN_26_EDIT, P_IMAGE_EDIT):
+        for model_name in (GROK_V2_EDIT, WAN_26_EDIT, P_IMAGE_EDIT):
             model = models.EDIT_MODELS[model_name]
             response = io.BytesIO(
                 json.dumps(
@@ -336,6 +337,12 @@ class ModelRegistryTests(unittest.TestCase):
             for name, model in registry.items():
                 self.assertEqual(name, model.name)
 
+    def test_grok_v2_edit_uses_nano_gpt_model_id(self):
+        model = models.EDIT_MODELS[GROK_V2_EDIT]
+
+        self.assertEqual(model.provider, models.Provider.NANO_GPT)
+        self.assertEqual(model.model_id, "xai/grok-imagine-image/v2.0/edit")
+
     def test_generate_ratio_overrides_cover_only_ui_ratios(self):
         for model in models.GENERATE_MODELS.values():
             for ui_ratio in model.ratio_overrides:
@@ -381,7 +388,12 @@ class ProviderRoutingTests(unittest.TestCase):
             )
 
     def test_nano_gpt_edit_models_route_to_nano_gpt_client(self):
-        for model_name in (SEEDREAM_PRO_EDIT, WAN_26_EDIT, P_IMAGE_EDIT):
+        for model_name in (
+            GROK_V2_EDIT,
+            SEEDREAM_PRO_EDIT,
+            WAN_26_EDIT,
+            P_IMAGE_EDIT,
+        ):
             model = models.EDIT_MODELS[model_name]
             with (
                 self.subTest(model=model_name),

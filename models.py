@@ -86,6 +86,11 @@ EDIT_MODELS = _by_name(
             "xai/grok-imagine-image/edit",
         ),
         EditModel(
+            "Grok Imagine Image v2.0 Edit (NanoGPT)",
+            Provider.NANO_GPT,
+            "xai/grok-imagine-image/v2.0/edit",
+        ),
+        EditModel(
             "Seedream 5.0 Pro Edit (NanoGPT)",
             Provider.NANO_GPT,
             "bytedance/seedream-v5.0-pro/edit",
