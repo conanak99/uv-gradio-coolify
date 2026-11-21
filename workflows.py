@@ -47,7 +47,7 @@ type CompletedJob = tuple[str, list[GalleryItem]]
 JOB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=15)
 JOB_HEARTBEAT_SECONDS = 1.0
 # One edit submission (batch) accepts at most this many input images.
-MAX_EDIT_BATCH_SIZE = 8
+MAX_EDIT_BATCH_SIZE = 20
 
 
 # --- Input handling -------------------------------------------------------
