@@ -47,7 +47,11 @@ type CompletedJob = tuple[str, list[GalleryItem]]
 JOB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=15)
 JOB_HEARTBEAT_SECONDS = 1.0
 # One edit submission (batch) accepts at most this many input images.
-MAX_EDIT_BATCH_SIZE = 8
+MAX_EDIT_BATCH_SIZE = 20
+# Upper bound on concurrent model API calls per fan-out, to stay under
+# provider rate limits (a 20-image batch x models would otherwise fan out
+# unbounded).
+MAX_PARALLEL_MODEL_CALLS = 10
 
 
 # --- Input handling -------------------------------------------------------
@@ -204,10 +208,10 @@ def run_models_in_parallel(
     """Run one task per model, reporting partial results as each finishes."""
     results: list[GalleryItem] = []
     errors: list[str] = []
-    # One worker per task so a full batch (images x models) runs concurrently
-    # instead of queueing behind the default worker count.
+    # Cap concurrent workers so large batches stay under provider rate limits;
+    # extra tasks queue behind freed workers instead of all firing at once.
     with concurrent.futures.ThreadPoolExecutor(
-        max_workers=max(1, len(tasks))
+        max_workers=max(1, min(len(tasks), MAX_PARALLEL_MODEL_CALLS))
     ) as executor:
         futures = {
             executor.submit(run_timed_task, task): model_name

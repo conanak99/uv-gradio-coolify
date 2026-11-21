@@ -623,12 +623,15 @@ class ProviderRoutingTests(unittest.TestCase):
             workflows.select_edit_batch_inputs(None)
 
     def test_select_edit_batch_inputs_rejects_oversized_batch(self):
-        images = [f"/tmp/input-{index}.png" for index in range(9)]
+        images = [f"/tmp/input-{index}.png" for index in range(workflows.MAX_EDIT_BATCH_SIZE + 1)]
 
-        with self.assertRaisesRegex(Exception, "at most 8 images per batch"):
+        with self.assertRaisesRegex(
+            Exception,
+            f"at most {workflows.MAX_EDIT_BATCH_SIZE} images per batch",
+        ):
             workflows.select_edit_batch_inputs(images)
 
-        self.assertEqual(workflows.MAX_EDIT_BATCH_SIZE, 8)
+        self.assertEqual(workflows.MAX_EDIT_BATCH_SIZE, 20)
         self.assertEqual(
             len(workflows.select_edit_batch_inputs(images[:8])),
             8,
